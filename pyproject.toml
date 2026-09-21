@@ -5,10 +5,22 @@ description = "Real-time fraud detection with a closed-loop MLOps pipeline (port
 authors = [{ name = "Mazen Ben Brahim" }]
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-dependencies = []
+dependencies = [
+    "joblib>=1.6.0",
+    "lightgbm>=4.7.0",
+    "matplotlib>=3.11.2",
+    "mlflow>=3.16.1",
+    "numpy>=2.4.6",
+    "pandas>=3.0.6",
+    "pyyaml>=6.0.3",
+    "scikit-learn>=1.9.1",
+]
 
 [dependency-groups]
 dev = [
+    "ipykernel>=7.3.0",
+    "jupyter>=1.1.1",
+    "nbformat>=5.11.1",
     "pre-commit>=4.0",
     "pytest>=8.3",
     "ruff>=0.8",
