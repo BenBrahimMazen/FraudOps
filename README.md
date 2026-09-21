@@ -18,16 +18,15 @@ model is deployed.
 | Phase | Scope | State |
 |---|---|---|
 | 0 | Scaffolding, tooling, CI | done |
-| 1 | Data, chronological split, LightGBM baseline, cost threshold | pending |
+| 1 | Data, chronological split, LightGBM baseline, cost threshold | done |
 | 2 | MLflow/MinIO registry, Airflow, FastAPI serving | pending |
 | 3 | Kafka replay, delayed labels, drift monitoring | pending |
 | 4 | Closed loop: trigger → retrain → gate → promote/rollback | pending |
 | 5 | Experiments, load testing, figures | pending |
 | 6 | Terraform/LocalStack, CI/CD polish | pending |
 
-No results exist yet — every metric on this README will say **"not yet
-measured"** until a real pipeline run produces it, and each figure will come
-with the command that regenerates it.
+Every metric below comes from a real run (`make train`, seed 42) and can be
+regenerated with the command shown; nothing is estimated.
 
 ## Quickstart (current state)
 
@@ -38,10 +37,45 @@ Phase 2 onward.
 ```bash
 uv sync        # or: make install — create the locked virtualenv
 make lint      # ruff check + format check
-make test      # pytest
+make test      # pytest (39 tests; the real-data guard skips if no dataset)
+make data      # validate the two CSVs in data/raw/
+make train     # full baseline: load -> split -> features -> LightGBM -> threshold -> evaluation -> MLflow
 ```
 
-The full stack (`make up`) arrives in Phase 2.
+The full stack (`make up`) arrives in Phase 2. Exploration notebook:
+`notebooks/01_eda.ipynb` (executed outputs committed).
+
+## Phase 1 results — baseline (one command: `make train`)
+
+Chronological split in simulated days (0–119 / 120–149 / 150–182): train
+410,601 rows (fraud rate 3.51%), validation 85,303 (3.47%), stream 94,636
+(3.47%). The feature pipeline is fitted on the training split only; the
+cost-optimal threshold (0.0296) is selected on validation only; the stream is
+scored without ever being used for tuning.
+
+| window | PR-AUC | ROC-AUC | recall @1% FPR | model cost /100k | no-model /100k | fixed 0.5 /100k | F1-optimal /100k |
+|---|---|---|---|---|---|---|---|
+| train | 0.988 | 0.999 | 0.993 | 117,737 | 510,174 | 8,377 | 28,199 |
+| validation | 0.595 | 0.918 | 0.528 | **188,073** | 578,902 | 282,208 | 340,315 |
+| stream | 0.500 | 0.884 | 0.442 | **211,523** | 523,315 | 325,717 | 352,308 |
+
+(costs in the transaction currency; a missed fraud costs its amount, a false
+alert costs 5.0 — `configs/costs.yaml`)
+
+Honest reading:
+
+- The train/validation PR-AUC gap (0.988 → 0.595) is deliberate overfitting
+  left unpruned: no early stopping, because validation is reserved for
+  threshold selection. Nothing looks suspiciously good on unseen data, and the
+  chronological leakage guards all pass.
+- The cost-optimal threshold beats all three baselines on validation and on
+  the stream (211.5k vs 325.7k at fixed 0.5 vs 352.3k at the F1-optimal
+  threshold vs 523.3k with no model).
+- At a 5.0 review cost the optimum alerts ~27% of transactions — mathematically
+  correct (average fraud amount ≈ 149) but operationally unrealistic; the
+  threshold-sensitivity experiment (Phase 5) quantifies this trade-off.
+- Degradation from validation to stream (PR-AUC 0.595 → 0.500) is the natural
+  drift the monitoring phase will track and the retraining loop will act on.
 
 ## Dataset
 
@@ -69,6 +103,13 @@ competition's `test_*` files carry no labels and are never used for
 evaluation.
 
 ## Limitations
+
+- **Baseline overfits by design** (0.988 train vs 0.595 validation PR-AUC): no
+  early stopping or hyperparameter search, to keep validation reserved for
+  threshold selection and the stream untouched by tuning.
+- **Feature set is deliberately small**: no anonymised V-columns and no
+  competition-style group-key aggregation features; leaderboard-grade PR-AUC
+  is explicitly not the goal of this project.
 
 Maintained honestly from day one (every claim must trace to a run):
 
