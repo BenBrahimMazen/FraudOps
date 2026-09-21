@@ -1,0 +1,10 @@
+# Business cost model.
+# A missed fraud costs the transaction amount; a false alert costs a fixed
+# review effort. The decision threshold minimises expected total cost on
+# validation data — not F1. Costs are reported per 100k transactions.
+
+false_alert_cost: 5.0
+
+# Reporting
+per_transactions: 100000   # normalisation window for expected cost
+recall_fpr_target: 0.01    # recall reported at this false-positive rate
