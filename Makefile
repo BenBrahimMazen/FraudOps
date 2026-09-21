@@ -14,7 +14,7 @@ help: ## List available targets
 	@echo "  test      - run the pytest suite"
 	@echo "  precommit - run all pre-commit hooks"
 	@echo "  up / down - start / stop the Docker stack            [Phase 2]"
-	@echo "  data      - validate dataset in data/raw/            [Phase 1: manual download, see README Dataset section]"
+	@echo "  data      - validate dataset in data/raw/            [manual download: see README Dataset section]"
 	@echo "  train     - train baseline + threshold + evaluation  [Phase 1]"
 	@echo "  replay    - replay the transaction stream            [Phase 3]"
 	@echo "  drift     - inject synthetic drift                   [Phase 3]"
@@ -44,11 +44,11 @@ up: ## Start the Docker stack [Phase 2]
 down: ## Stop the Docker stack [Phase 2]
 	@echo "down: not yet implemented (arrives in Phase 2)"
 
-data: ## Validate dataset presence and shape [Phase 1]
-	@echo "data: not yet implemented (arrives in Phase 1). Manual download: see README, Dataset section"
+data: ## Validate dataset presence and shape
+	$(PY) python -m fraudops.data.check
 
-train: ## Train baseline, pick cost-optimal threshold, evaluate [Phase 1]
-	@echo "train: not yet implemented (arrives in Phase 1)"
+train: ## Train baseline, pick cost-optimal threshold, evaluate
+	$(PY) python -m fraudops.models.train
 
 replay: ## Replay transactions to Kafka in TransactionDT order [Phase 3]
 	@echo "replay: not yet implemented (arrives in Phase 3)"

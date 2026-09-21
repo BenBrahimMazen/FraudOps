@@ -1,0 +1,22 @@
+# LightGBM baseline configuration. Fixed seed for reproducibility.
+
+seed: 42
+
+lgbm:
+  objective: binary
+  n_estimators: 500       # fixed (no early stopping): validation is reserved
+                          # for threshold selection, the stream is never used
+                          # for any tuning decision
+  learning_rate: 0.05
+  num_leaves: 63
+  min_child_samples: 100
+  subsample: 0.9
+  subsample_freq: 1
+  colsample_bytree: 0.9
+
+# Class imbalance is handled with scale_pos_weight computed from the training
+# split only (negatives / positives).
+
+features:
+  use_v_columns: false    # baseline keeps the feature set small and documented;
+                          # the anonymised V-block is off by default
