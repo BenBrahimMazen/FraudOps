@@ -1,0 +1,13 @@
+# Chronological split of the transaction timeline, in simulated days
+# (simulated day = TransactionDT // 86400; day indices run 0-182).
+#
+#   days [0, train_days)               -> training
+#   days [train_days, train_days+val)  -> validation (threshold selection, model comparison)
+#   days [train_days+val_days, ...)    -> replayed live stream (never used for tuning)
+#
+# All splits are chronological: train always precedes validation precedes the
+# stream. Enforced by tests.
+
+train_days: 120
+val_days: 30
+# remainder (days 150-181, ~32 days) is the replay stream
