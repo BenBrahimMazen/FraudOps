@@ -1,0 +1,36 @@
+# --- Data (never commit: Kaggle competition terms + size) ---
+data/
+
+# --- Secrets ---
+.env
+*.pem
+*.key
+
+# --- Python caches / build ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# --- MLflow local stores / artifacts (Phase 2+) ---
+mlruns/
+mlartifacts/
+mlflow.db
+
+# --- Notebooks / experiments ---
+.ipynb_checkpoints/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
