@@ -34,6 +34,10 @@ mlflow.db
 # --- Notebooks / experiments ---
 .ipynb_checkpoints/
 
+# --- Local scratch (may contain real data rows) ---
+tmp_*
+
+
 # --- OS / editor ---
 .DS_Store
 Thumbs.db

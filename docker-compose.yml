@@ -1,0 +1,166 @@
+# FraudOps local stack. Zero cloud cost: everything runs in Docker.
+#
+#   make up        -> core profile (postgres, minio, mlflow, api)
+#   make up-full   -> full profile (adds airflow; Kafka arrives with the
+#                     streaming phase and also belongs to `full`)
+#
+# Services tagged [core, full] so that `--profile full` includes the base.
+
+name: fraudops
+
+x-app-env: &app-env
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-fraudops}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-fraudops-local}
+  FRAUDOPS_MODEL_NAME: fraudops-lightgbm
+  FRAUDOPS_ADMIN_TOKEN: ${FRAUDOPS_ADMIN_TOKEN:-change-me-local-dev-token}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    profiles: [core, full]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fraudops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fraudops-local}
+      POSTGRES_DB: ${POSTGRES_DB:-fraudops}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fraudops} -d ${POSTGRES_DB:-fraudops}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  minio:
+    # object store for MLflow artifacts (S3-compatible API);
+    # images live on quay.io since Docker Hub retirement
+    image: quay.io/minio/minio:latest
+    profiles: [core, full]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-fraudops}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-fraudops-local}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  minio-init:
+    # one-shot: create the mlflow artifacts bucket
+    image: quay.io/minio/mc:latest
+    profiles: [core, full]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-fraudops} ${MINIO_ROOT_PASSWORD:-fraudops-local} &&
+      mc mb --ignore-existing local/mlflow"
+
+  mlflow:
+    build: ./infra/docker/mlflow
+    profiles: [core, full]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-fraudops}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-fraudops-local}
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql+psycopg2://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/mlflow
+      --artifacts-destination s3://mlflow
+      --default-artifact-root s3://mlflow
+      --allowed-hosts "*"
+    # ^ local dev only: clients reach the server as both `mlflow` (docker
+    #   network) and `localhost` (browser); host validation is a production
+    #   hardening feature we disable in this zero-cost local stack
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/docker/api/Dockerfile
+    profiles: [core, full]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/${POSTGRES_DB:-fraudops}
+    ports:
+      - "${API_PORT:-8000}:8000"
+
+  bootstrap:
+    # one-shot training job: trains on the mounted dataset and registers a
+    # model. Lives in its own `tools` profile so `up` never auto-starts it;
+    # the Makefile runs it via `docker compose --profile tools run --rm
+    # bootstrap <action>`
+    build:
+      context: .
+      dockerfile: infra/docker/api/Dockerfile
+    profiles: [tools]
+    depends_on:
+      mlflow:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+    volumes:
+      - ./data:/data:ro
+      - ./configs:/app/configs:ro
+      - ./reports:/app/reports
+    entrypoint: ["python", "-m", "fraudops.registry.bootstrap"]
+
+  airflow:
+    build:
+      context: .
+      dockerfile: infra/docker/airflow/Dockerfile
+    profiles: [full]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+      AIRFLOW__CORE__FERNET_KEY: ""
+      FRAUDOPS_DATA_DIR: /data/raw
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - ./data:/data:ro
+      - ./configs:/opt/airflow/configs:ro
+      - ./reports:/opt/airflow/reports
+      - airflow-logs:/opt/airflow/logs
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    # single-container local deployment: API server + scheduler + dag processor
+    command: standalone
+
+volumes:
+  pgdata:
+  minio-data:
+  airflow-logs:
