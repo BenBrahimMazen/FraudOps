@@ -91,9 +91,7 @@ def load_identity(path: str | Path) -> pd.DataFrame:
     return _read_csv(Path(path), _ID_CATEGORY_COLUMNS)
 
 
-def load_joined(
-    transactions_path: str | Path, identity_path: str | Path
-) -> pd.DataFrame:
+def load_joined(transactions_path: str | Path, identity_path: str | Path) -> pd.DataFrame:
     """Left-join identity onto transactions and add a ``has_identity`` flag.
 
     Rows without identity information keep NaN in the id_*/Device* columns —

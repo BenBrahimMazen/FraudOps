@@ -79,3 +79,54 @@ def test_numeric_missingness_passes_through() -> None:
     pipe = FeaturePipeline().fit(frame)
     out = pipe.transform(frame)
     assert out.loc[0, "C1"] != out.loc[0, "C1"]  # NaN preserved, not imputed
+
+
+def test_booster_predict_matches_predict_proba(trained_bundle) -> None:
+    """Serving path (booster.predict) must equal the training metric path
+    (predict_proba positive column) — same booster, same numbers."""
+    import numpy as np
+
+    bundle, frame = trained_bundle
+    X = bundle.pipeline.transform(frame.head(50))
+    via_booster = bundle.model.booster_.predict(X)
+    via_sklearn = bundle.model.predict_proba(X)[:, 1]
+    np.testing.assert_allclose(via_booster, via_sklearn, rtol=1e-12)
+
+
+def test_transform_branch_parity(trained_bundle) -> None:
+    """Small-frame (serving) and vectorised (training) branches must produce
+    identical features for identical values."""
+    import numpy as np
+
+    bundle, frame = trained_bundle
+    pipe = bundle.pipeline
+    small = frame.head(2).reset_index(drop=True)
+    # same values, > _SMALL_FRAME_ROWS rows -> vectorised branch
+    big = pd.concat([small] * 20, ignore_index=True)
+    out_small = pipe.transform(small)
+    out_big = pipe.transform(big)
+    assert len(small) <= 32 < len(big)  # branches actually differ
+    for i in range(len(small)):
+        row_small = out_small.iloc[i]
+        row_big = out_big.iloc[i]
+        for col in pipe.feature_names_:
+            a, b = row_small[col], row_big[col]
+            if isinstance(a, float) and np.isnan(a):
+                assert np.isnan(b)
+            else:
+                assert a == b
+
+
+def test_transform_small_branch_handles_missing_values(trained_bundle) -> None:
+    bundle, frame = trained_bundle
+    pipe = bundle.pipeline
+    row = frame.head(1).reset_index(drop=True)
+    row.loc[0, "C1"] = np.nan
+    row.loc[0, "ProductCD"] = None
+    row.loc[0, "id_02"] = None  # whole identity block empty -> has_identity False
+    row.loc[0, "DeviceInfo"] = None
+    probe = row.drop(columns=["has_identity"])  # serving frames lack the flag
+    out = pipe.transform(probe)  # small branch
+    assert np.isnan(out.loc[0, "C1"])
+    assert out.loc[0, "ProductCD"] != out.loc[0, "ProductCD"]  # NaN category
+    assert out.loc[0, "has_identity"] == 0.0
