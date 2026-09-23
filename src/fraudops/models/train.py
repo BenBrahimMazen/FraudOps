@@ -8,7 +8,12 @@ Usage (see Makefile ``train``):
 Data flow rules enforced here:
 - the feature pipeline is fitted on the training split only;
 - the cost-optimal threshold is selected on the validation split only;
-- the replay stream is scored for honest, never-tuned-on reporting.
+- the replay stream is scored for honest, never-tuned-on reporting;
+- the model is logged to MLflow as a pyfunc artifact that carries the
+  pipeline and the threshold with it (single artifact, no serving skew).
+
+Tracking destination: the ``MLFLOW_TRACKING_URI`` environment variable when
+set (the Docker stack's MLflow server), otherwise a local SQLite store.
 """
 
 from __future__ import annotations
@@ -16,9 +21,9 @@ from __future__ import annotations
 import argparse
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
-import joblib
 import pandas as pd
 import yaml
 
@@ -31,11 +36,22 @@ from fraudops.data.splits import STREAM, TRAIN, VALIDATION, chronological_split
 from fraudops.features.pipeline import FeaturePipeline
 from fraudops.models.evaluate import baseline_costs, compute_metrics
 from fraudops.models.threshold import optimal_cost_threshold
+from fraudops.registry.wrapper import FraudOpsModel
+
+EXPERIMENT_NAME = "fraudops_training"
 
 
 def _load_yaml(path: Path) -> dict:
     with path.open(encoding="utf-8") as fh:
         return yaml.safe_load(fh)
+
+
+def _resolve_tracking_uri(mlflow_dir: Path) -> str:
+    env = os.environ.get("MLFLOW_TRACKING_URI")
+    if env:
+        return env
+    mlflow_dir.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{(mlflow_dir / 'mlflow.db').as_posix()}"
 
 
 def train_baseline(
@@ -109,42 +125,37 @@ def train_baseline(
         name: baseline_costs(y[name], amt[name], scores[name], false_alert_cost) for name in splits
     }
 
-    # ------------------------------------------------------------- persist
+    # ------------------------------------------------------------- reports
     out_dir.mkdir(parents=True, exist_ok=True)
     reports_dir.mkdir(parents=True, exist_ok=True)
-    bundle_path = out_dir / "phase1_baseline.joblib"
-    joblib.dump(
-        {
-            "model": model,
-            "pipeline": pipeline,
-            "threshold": float(threshold),
-            "false_alert_cost": false_alert_cost,
-            "feature_names": list(pipeline.feature_names_),
-            "train_days": splits_cfg["train_days"],
-            "val_days": splits_cfg["val_days"],
-            "seed": seed,
-        },
-        bundle_path,
-    )
-
     rows = []
     for name in (TRAIN, VALIDATION, STREAM):
-        row = {
-            "window": name,
-            **{k: round(v, 6) for k, v in metrics[name].items()},
-            **{f"cost_{k}": round(v, 2) for k, v in baselines[name].items()},
-        }
-        rows.append(row)
+        rows.append(
+            {
+                "window": name,
+                **{k: round(v, 6) for k, v in metrics[name].items()},
+                **{f"cost_{k}": round(v, 2) for k, v in baselines[name].items()},
+            }
+        )
     results = pd.DataFrame(rows)
     results.to_csv(reports_dir / "results_table.csv", index=False)
 
     # -------------------------------------------------------------- mlflow
-    # Local SQLite tracking store for this phase (the file backend is in
-    # maintenance mode in MLflow 3.x). Phase 2 moves tracking to the
-    # Postgres-backed server with MinIO artifacts.
-    mlflow_dir.mkdir(parents=True, exist_ok=True)
-    mlflow.set_tracking_uri(f"sqlite:///{(mlflow_dir / 'mlflow.db').as_posix()}")
-    with mlflow.start_run(run_name="phase1-baseline"):
+    tracking_uri = _resolve_tracking_uri(mlflow_dir)
+    mlflow.set_tracking_uri(tracking_uri)
+    mlflow.set_experiment(EXPERIMENT_NAME)
+    metadata = {
+        "threshold": float(threshold),
+        "false_alert_cost": false_alert_cost,
+        "train_days": splits_cfg["train_days"],
+        "val_days": splits_cfg["val_days"],
+        "n_features": X[TRAIN].shape[1],
+        "seed": seed,
+        "trained_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "metrics": {name: dict(m) for name, m in metrics.items()},
+        "baselines": {name: dict(b) for name, b in baselines.items()},
+    }
+    with mlflow.start_run(run_name="fraudops-baseline") as run:
         mlflow.log_params(
             {
                 "train_days": splits_cfg["train_days"],
@@ -158,12 +169,18 @@ def train_baseline(
         )
         for name in splits:
             mlflow.log_metrics({f"{name}_{k}": v for k, v in metrics[name].items()}, step=0)
-        mlflow.log_artifact(str(bundle_path))
         mlflow.log_artifact(str(reports_dir / "results_table.csv"))
+        mlflow.pyfunc.log_model(
+            name="model",
+            python_model=FraudOpsModel(model, pipeline, float(threshold), metadata),
+        )
+        run_id = run.info.run_id
 
     print("\nresults (cost per 100k transactions):")
     print(results.to_string(index=False))
+    print(f"mlflow run: {run_id} ({tracking_uri})")
     return {
+        "run_id": run_id,
         "metrics": metrics,
         "baselines": baselines,
         "threshold": float(threshold),
