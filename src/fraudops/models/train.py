@@ -55,12 +55,15 @@ def _resolve_tracking_uri(mlflow_dir: Path) -> str:
 
 
 def train_baseline(
-    configs_dir: Path = Path("configs"),
-    data_dir: Path = Path("data/raw"),
-    out_dir: Path = Path("models"),
-    reports_dir: Path = Path("reports"),
-    mlflow_dir: Path = Path("mlruns"),
+    configs_dir: Path | str = Path("configs"),
+    data_dir: Path | str = Path("data/raw"),
+    out_dir: Path | str = Path("models"),
+    reports_dir: Path | str = Path("reports"),
+    mlflow_dir: Path | str = Path("mlruns"),
 ) -> dict:
+    # accept plain strings too (DAG tasks pass env-var values unwrapped)
+    configs_dir, data_dir = Path(configs_dir), Path(data_dir)
+    out_dir, reports_dir, mlflow_dir = Path(out_dir), Path(reports_dir), Path(mlflow_dir)
     splits_cfg = _load_yaml(configs_dir / "splits.yaml")
     costs_cfg = _load_yaml(configs_dir / "costs.yaml")
     model_cfg = _load_yaml(configs_dir / "model.yaml")

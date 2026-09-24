@@ -19,31 +19,75 @@ model is deployed.
 |---|---|---|
 | 0 | Scaffolding, tooling, CI | done |
 | 1 | Data, chronological split, LightGBM baseline, cost threshold | done |
-| 2 | MLflow/MinIO registry, Airflow, FastAPI serving | pending |
+| 2 | MLflow/MinIO registry, Airflow, FastAPI serving | done |
 | 3 | Kafka replay, delayed labels, drift monitoring | pending |
 | 4 | Closed loop: trigger → retrain → gate → promote/rollback | pending |
 | 5 | Experiments, load testing, figures | pending |
 | 6 | Terraform/LocalStack, CI/CD polish | pending |
 
-Every metric below comes from a real run (`make train`, seed 42) and can be
-regenerated with the command shown; nothing is estimated.
+Every metric below comes from a real run and can be regenerated with the
+command shown; nothing is estimated.
 
 ## Quickstart (current state)
 
 Requirements: Python 3.11, [`uv`](https://docs.astral.sh/uv/), GNU `make`
-(on Windows: `winget install ezwinports.make`). Docker Desktop is needed from
-Phase 2 onward.
+(on Windows: `winget install ezwinports.make`), Docker Desktop (Phases 2+).
 
 ```bash
 uv sync        # or: make install — create the locked virtualenv
 make lint      # ruff check + format check
-make test      # pytest (39 tests; the real-data guard skips if no dataset)
+make test      # pytest (65 fast tests + real-data guard)
 make data      # validate the two CSVs in data/raw/
-make train     # full baseline: load -> split -> features -> LightGBM -> threshold -> evaluation -> MLflow
+make train     # local run: load -> split -> features -> LightGBM -> threshold -> evaluation -> MLflow
+make up        # core stack: postgres, minio, mlflow, api
+make bootstrap # train + register + set the first champion (inside the stack)
+make up-full   # + airflow (single container, LocalExecutor, Postgres metadata)
 ```
 
-The full stack (`make up`) arrives in Phase 2. Exploration notebook:
-`notebooks/01_eda.ipynb` (executed outputs committed).
+Exploration notebook: `notebooks/01_eda.ipynb` (executed outputs committed).
+
+## The serving stack (Phase 2)
+
+`make up` starts the `core` profile — Postgres (predictions + MLflow +
+Airflow databases), MinIO (S3-compatible artifacts), an MLflow server
+(Postgres backend, MinIO artifacts) and the scoring API. `make up-full` adds
+Airflow (`fraudops_train` DAG: train → evaluate → register as challenger).
+
+**Registry.** The model is ONE MLflow pyfunc artifact carrying the model,
+the feature pipeline and the cost-optimal threshold together — training and
+serving cannot disagree about the decision rule. Aliases: `champion` (what
+serving loads, `models:/fraudops-lightgbm@champion`) and `challenger` (what
+training registers). `make status` / `make promote` / `make rollback`
+operate the aliases.
+
+**API** (`:8000`, contract in the OpenAPI docs at `/docs`):
+
+| endpoint | behaviour |
+|---|---|
+| `POST /score` | probability, decision, threshold, model version, top-3 SHAP reasons, latency |
+| `POST /score/batch` | up to 1,000 transactions |
+| `GET /health`, `GET /model` | liveness; champion version/threshold/training window/metrics |
+| `GET /metrics` | Prometheus: request counts, latency histograms, decisions, score distribution |
+| `POST /admin/reload` | force champion reload (token header) |
+
+Zero-downtime reload: a background poller swaps the champion atomically when
+the alias changes (≤15 s), or `/admin/reload` forces it immediately. Every
+scored transaction is persisted to Postgres through a bounded queue and a
+batch writer — scoring never blocks on the database (drops are counted, not
+raised). Serving 503s with a clear error while no champion exists.
+
+**Measured on this machine** (single-user, 60 steady-state `/score` calls,
+Docker stack, champion v1 — 500 trees, 96 features):
+
+- scoring latency **p50 60.4 ms / p95 92.7 ms** (target: p95 < 100 ms;
+  the p50 includes probability AND SHAP reasons from one fused
+  LightGBM `pred_contrib` call)
+- `/score/batch` of 100 real stream transactions: 73 approve / 27 alert
+  (27% alert rate, matching the offline evaluation), ~4 ms/row amortised
+- 288 predictions persisted to Postgres with model version + latency;
+  `/metrics` exposes the same counts
+
+The load-test numbers under concurrent Locust traffic arrive in Phase 5.
 
 ## Phase 1 results — baseline (one command: `make train`)
 
@@ -110,6 +154,13 @@ evaluation.
 - **Feature set is deliberately small**: no anonymised V-columns and no
   competition-style group-key aggregation features; leaderboard-grade PR-AUC
   is explicitly not the goal of this project.
+- **Latency numbers are single-user** so far: the p50/p95 above are
+  steady-state sequential calls inside Docker on one laptop; concurrent
+  Locust numbers (Phase 5) are not yet measured.
+- **Airflow runs as a single container** (`standalone`, LocalExecutor) — a
+  local-scale deployment, not a production Airflow topology; the fraudops
+  package is installed under Airflow's constraint set, so its pandas/fastapi
+  versions differ from the application lock file inside that one image.
 
 Maintained honestly from day one (every claim must trace to a run):
 
@@ -119,8 +170,6 @@ Maintained honestly from day one (every claim must trace to a run):
 - **Anonymised features.** Most IEEE-CIS columns (V1–V339, C*, D*, M*) carry
   no business meaning; SHAP reason codes will be technical, not analyst
   narratives.
-- **No measured performance yet.** PR-AUC, cost per 100k transactions, p95
-  latency: all "not yet measured" until the relevant phase runs.
 - **Single machine.** All latency/load numbers will be laptop-specific
   (hardware documented alongside each figure).
 - **Data licensing.** Kaggle competition terms apply; this repo contains only
