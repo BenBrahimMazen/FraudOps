@@ -89,6 +89,27 @@ Docker stack, champion v1 — 500 trees, 96 features):
 
 The load-test numbers under concurrent Locust traffic arrive in Phase 5.
 
+## Orchestration (Phase 2, `make up-full`)
+
+A single-container Airflow (standalone, LocalExecutor, Postgres metadata)
+runs the `fraudops_train` DAG: **train → evaluate → register challenger**,
+reusing the exact same library the CLI bootstrap uses (no orchestration-only
+code path). Measured end-to-end on this machine:
+
+- DAG run `manual__2026-09-24T13:16:52Z`: both tasks green; training inside
+  the container took 54.4 s; the run registered **version 2** as challenger
+  with the same threshold as version 1 (0.02961 — same seed, same data,
+  reproducible)
+- `make promote` → champion 1→2; the serving API swapped models through its
+  background poller **without a restart** (`/health` reported version 2
+  within 20 s)
+- `make rollback` → champion 2→1; the API followed back automatically
+
+The Airflow image installs the package under Airflow's constraint set
+(pandas 2.1.4 there vs 3.0.6 in the lock file); a container-side smoke
+script (`scripts/smoke_airflow_env.py`) exercises both feature-pipeline
+branches plus a LightGBM fit on that stack before DAG runs are trusted.
+
 ## Phase 1 results — baseline (one command: `make train`)
 
 Chronological split in simulated days (0–119 / 120–149 / 150–182): train
