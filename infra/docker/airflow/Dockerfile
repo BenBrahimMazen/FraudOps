@@ -5,6 +5,9 @@
 # Airflow 3.0.4 is tested with — the application lock file pins newer ones.
 FROM apache/airflow:3.0.4-python3.11
 USER root
+# libgomp1: OpenMP runtime required by LightGBM's compiled wheel
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml uv.lock /tmp/fraudops/
 COPY src /tmp/fraudops/src
 COPY README.md /tmp/fraudops/

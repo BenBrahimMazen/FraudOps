@@ -13,7 +13,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from fraudops.data.clock import sim_day
 from fraudops.features.pipeline import FeaturePipeline
 
 
@@ -51,7 +50,15 @@ def main() -> None:
     out = pipe.transform(later)
     assert pd.isna(out["ProductCD"].iloc[0])
 
-    print("smoke OK: vectorised + small branches, unseen -> missing")
+    # the full training stack: lightgbm import (libgomp!), fit, predict
+    from lightgbm import LGBMClassifier
+
+    y = (frame["C1"] > 2.5).astype(int)
+    model = LGBMClassifier(n_estimators=3, verbosity=-1, random_state=0)
+    model.fit(X, y)
+    assert len(model.predict_proba(X)) == n
+
+    print("smoke OK: vectorised + small branches, unseen -> missing, lightgbm fit")
 
 
 if __name__ == "__main__":
