@@ -116,11 +116,15 @@ class FeaturePipeline:
         # Categorical from codes (O(1); astype(CategoricalDtype) would rebuild
         # over the full category list on every call). Unseen values map to
         # code -1 == missing, exactly like the training-side semantics.
+        # astype(object) first: Series.map on a categorical dtype returns a
+        # Categorical on pandas 2 (the Airflow image's constraint set), whose
+        # fillna(-1) then raises; object-typed input behaves identically on
+        # pandas 2 and 3.
         cat_parts = []
         for col, mapping in self._cat_maps_.items():
             if col not in df.columns:
                 continue  # vocabulary learned without this column
-            codes = df[col].map(mapping).fillna(-1).astype("int32")
+            codes = df[col].astype(object).map(mapping).fillna(-1).astype("int32")
             cat_parts.append(
                 pd.Series(
                     pd.Categorical.from_codes(codes.to_numpy(), dtype=self._cat_dtypes_[col]),

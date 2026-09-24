@@ -154,6 +154,7 @@ services:
       - ./dags:/opt/airflow/dags:ro
       - ./data:/data:ro
       - ./configs:/opt/airflow/configs:ro
+      - ./scripts:/opt/airflow/scripts:ro
       - ./reports:/opt/airflow/reports
       - airflow-logs:/opt/airflow/logs
     ports:
