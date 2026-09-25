@@ -10,7 +10,10 @@ from __future__ import annotations
 import psycopg
 
 SCHEMA = """
--- scored transactions (serving phase + streaming phase columns)
+-- scored transactions (serving phase + streaming phase columns).
+-- The ALTER runs BEFORE the index that uses the column: databases created
+-- in the serving phase lack sim_ts, and an index on a missing column would
+-- abort this whole script before the migration applies.
 CREATE TABLE IF NOT EXISTS predictions (
     id                 BIGSERIAL PRIMARY KEY,
     transaction_id     BIGINT,
@@ -22,9 +25,9 @@ CREATE TABLE IF NOT EXISTS predictions (
     latency_ms         DOUBLE PRECISION,
     sim_ts             BIGINT
 );
+ALTER TABLE predictions ADD COLUMN IF NOT EXISTS sim_ts BIGINT;
 CREATE INDEX IF NOT EXISTS predictions_scored_at_idx ON predictions (scored_at);
 CREATE INDEX IF NOT EXISTS predictions_sim_ts_idx ON predictions (sim_ts);
-ALTER TABLE predictions ADD COLUMN IF NOT EXISTS sim_ts BIGINT;
 
 -- ground truth, staged by the replay producer with an availability time
 CREATE TABLE IF NOT EXISTS labels_pending (
