@@ -162,6 +162,130 @@ services:
     # single-container local deployment: API server + scheduler + dag processor
     command: standalone
 
+  kafka:
+    # single-broker KRaft (no zookeeper); internal listener for the stack,
+    # external for host-side tools
+    image: apache/kafka:3.9.0
+    profiles: [full]
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:29093,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  scorer:
+    # streaming consumer: kafka -> champion model -> predictions (+ features)
+    build:
+      context: .
+      dockerfile: infra/docker/api/Dockerfile
+    profiles: [full]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/${POSTGRES_DB:-fraudops}
+    command: ["python", "-m", "fraudops.streaming.consumer"]
+
+  label-release:
+    # moves labels into visibility once the simulated clock passes their
+    # availability time (default 7 simulated days after the transaction)
+    build:
+      context: .
+      dockerfile: infra/docker/api/Dockerfile
+    profiles: [full]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/${POSTGRES_DB:-fraudops}
+    command: ["python", "-m", "fraudops.streaming.labels"]
+
+  monitor:
+    # drift reference from the training split + rolling PSI/KS/performance
+    build:
+      context: .
+      dockerfile: infra/docker/api/Dockerfile
+    profiles: [full, monitoring]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/${POSTGRES_DB:-fraudops}
+      FRAUDOPS_DATA_DIR: /data/raw
+    volumes:
+      - ./data:/data:ro
+      - ./configs:/app/configs:ro
+      - ./reports:/app/reports
+    ports:
+      - "${MONITOR_METRICS_PORT:-9101}:9101"
+    command: ["python", "-m", "fraudops.monitoring.monitor"]
+
+  replay:
+    # one-shot producer; `make replay` runs it against the live stack
+    build:
+      context: .
+      dockerfile: infra/docker/api/Dockerfile
+    profiles: [tools]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/${POSTGRES_DB:-fraudops}
+    volumes:
+      - ./data:/data:ro
+      - ./configs:/app/configs:ro
+    entrypoint: ["python", "-m", "fraudops.streaming.replay"]
+
+  prometheus:
+    image: prom/prometheus:v3.7.1
+    profiles: [full, monitoring]
+    volumes:
+      - ./dashboards/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    profiles: [full, monitoring]
+    depends_on:
+      - prometheus
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./dashboards/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./dashboards/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+
 volumes:
   pgdata:
   minio-data:

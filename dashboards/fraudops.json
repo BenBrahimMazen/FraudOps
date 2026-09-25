@@ -1,0 +1,147 @@
+{
+  "title": "FraudOps — streaming, drift and cost",
+  "uid": "fraudops-main",
+  "tags": ["fraudops"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Scoring API — request rate by path",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (path) (rate(fraudops_http_requests_total[1m]))",
+          "legendFormat": "{{path}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "title": "Scoring API — p95 latency",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(fraudops_scoring_latency_seconds_bucket[5m])))",
+          "legendFormat": "p95 scoring"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(fraudops_http_request_latency_seconds_bucket{path=\"/score\"}[5m])))",
+          "legendFormat": "p95 http /score"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null },
+          { "color": "red", "value": 0.1 }
+        ]}},
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Decisions (approve / alert)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (decision) (rate(fraudops_scoring_decisions_total[1m]))",
+          "legendFormat": "{{decision}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "title": "Score distribution (fraud probability)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (le) (increase(fraudops_score_distribution_bucket[1m]))",
+          "legendFormat": "≤ {{le}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Drift — PSI by feature (0 ok / >0.1 warning / >0.2 alert)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "expr": "fraudops_drift_psi > 0",
+          "legendFormat": "{{name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 0 },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 0.1 },
+            { "color": "red", "value": 0.2 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "title": "Drift — level by feature (0 ok / 1 warning / 2 alert)",
+      "type": "stat",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 16 },
+      "targets": [{ "expr": "fraudops_drift_level", "legendFormat": "{{name}}" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 1 },
+            { "color": "red", "value": 2 }
+          ]}
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Performance — PR-AUC on the labelled window",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 25 },
+      "targets": [{ "expr": "fraudops_pr_auc", "legendFormat": "pr_auc" }],
+      "fieldConfig": { "defaults": { "decimals": 3, "min": 0, "max": 1 }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "title": "Business — expected cost per 100k (window)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 25 },
+      "targets": [{ "expr": "fraudops_cost_per_100k", "legendFormat": "cost / 100k" }],
+      "fieldConfig": { "defaults": { "unit": "currencyUSD" }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "title": "Model version & retrain trigger",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 25 },
+      "targets": [
+        { "expr": "fraudops_champion_version", "legendFormat": "champion version" },
+        { "expr": "fraudops_retrain_trigger", "legendFormat": "retrain trigger" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "red", "value": 1 }
+          ]}
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

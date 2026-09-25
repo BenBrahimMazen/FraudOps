@@ -28,8 +28,10 @@ help: ## List available targets
 	@echo "  logs       - tail stack logs"
 	@echo "  data       - validate dataset in data/raw/ (manual download: README)"
 	@echo "  train      - local training run (host, sqlite tracking)"
-	@echo "  replay     - replay the transaction stream            [Phase 3]"
-	@echo "  drift      - inject synthetic drift                   [Phase 3]"
+	@echo "  replay     - replay the stream (DAY_SECONDS=..., MAX=...)"
+	@echo "  drift-*    - inject/inspect drift (drift-amount FACTOR=3 FROM_DAY=165)"
+	@echo "               drift-nullify COLS=card4 FROM_DAY=165, drift-list, drift-off ID=1"
+	@echo "  report-evidently - HTML drift report for the last window"
 	@echo "  loadtest   - Locust load test of /score               [Phase 5]"
 	@echo "  report     - regenerate all figures and tables        [Phase 5]"
 
@@ -82,14 +84,36 @@ data: ## Validate dataset presence and shape
 train: ## Local training run (host, sqlite tracking)
 	$(PY) python -m fraudops.models.train
 
-replay: ## Replay transactions to Kafka in TransactionDT order [Phase 3]
-	@echo "replay: not yet implemented (arrives in Phase 3)"
 
-drift: ## Inject synthetic drift into the stream [Phase 3]
-	@echo "drift: not yet implemented (arrives in Phase 3)"
+replay: ## Replay the stream to Kafka (DAY_SECONDS=30 MAX= for caps)
+	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm replay \
+	    --bootstrap-servers kafka:29092 --data-dir /data/raw \
+	    --day-seconds $$(or $$(DAY_SECONDS),30) $$(if $$(MAX),--max-events $$(MAX),)
+
+drift-amount: ## Inject an amount shift (FACTOR=3 FROM_DAY=165)
+	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	    -m fraudops.monitoring.injector amount-factor \
+	    --factor $$(or $$(FACTOR),3) --from-day $$(or $$(FROM_DAY),165)
+
+drift-nullify: ## Null features from a sim day (COLS=card4 FROM_DAY=165)
+	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	    -m fraudops.monitoring.injector nullify \
+	    --columns "$$(or $$(COLS),card4)" --from-day $$(or $$(FROM_DAY),165)
+
+drift-list: ## List drift injections
+	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	    -m fraudops.monitoring.injector list
+
+drift-off: ## Deactivate an injection (ID=1)
+	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	    -m fraudops.monitoring.injector deactivate --id $$(ID)
+
+report-evidently: ## HTML drift report for the last window
+	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	    -m fraudops.monitoring.evidently_report --data-dir /data/raw
 
 loadtest: ## Locust load test of the scoring API [Phase 5]
 	@echo "loadtest: not yet implemented (arrives in Phase 5)"
 
 report: ## Regenerate every figure and table from raw data [Phase 5]
-	@echo "report: not yet implemented (arrives in Phase 5]"
+	@echo "report: not yet implemented (arrives in Phase 5)"

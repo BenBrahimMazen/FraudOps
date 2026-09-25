@@ -1,0 +1,20 @@
+# Drift monitoring and the retrain trigger.
+
+top_k_features: 20          # PSI on the top-K features by model importance
+psi:
+  warning: 0.1
+  alert: 0.2
+  bins: 10
+window_sim_days: 7           # rolling monitoring window (in simulated days)
+label_delay_days: 7          # labels become visible after this many sim days
+min_window_predictions: 200  # windows with fewer predictions are not judged
+
+performance:
+  pr_auc_tolerance: 0.05     # absolute drop vs reference that counts as drift
+  cost_ratio_tolerance: 1.15 # window cost / reference cost beyond this alerts
+  min_labelled: 500          # too few released labels -> performance stays silent
+
+trigger:
+  score_psi_alert: 0.2
+  feature_psi_alert: 0.2
+  min_features_in_alert: 3
