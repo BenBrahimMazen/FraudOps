@@ -1,0 +1,11 @@
+# Allowlist: image builds need only these paths. Everything else (notably
+# data/ at ~1 GB) stays out of the build context. demo/model and demo/meta.json
+# are gitignored but ARE needed by the demo image, so demo/ is included whole.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src
+!src/**
+!demo
+!demo/**
