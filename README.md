@@ -21,7 +21,8 @@ model is deployed.
 | 1 | Data, chronological split, LightGBM baseline, cost threshold | done |
 | 2 | MLflow/MinIO registry, Airflow, FastAPI serving | done |
 | 3 | Kafka replay, delayed labels, drift monitoring | done |
-| 4 | Closed loop: trigger → retrain → gate → promote/rollback | pending |
+| 4 | Closed loop: trigger → retrain → gate → promote/rollback | done |
+| 5 | Experiments, load testing, figures | pending |
 | 5 | Experiments, load testing, figures | pending |
 | 6 | Terraform/LocalStack, CI/CD polish | pending |
 
@@ -36,7 +37,7 @@ Requirements: Python 3.11, [`uv`](https://docs.astral.sh/uv/), GNU `make`
 ```bash
 uv sync        # or: make install — create the locked virtualenv
 make lint      # ruff check + format check
-make test      # pytest (65 fast tests + real-data guard)
+make test      # pytest (137 tests: unit, leakage, parity, gate, integration)
 make data      # validate the two CSVs in data/raw/
 make train     # local run: load -> split -> features -> LightGBM -> threshold -> evaluation -> MLflow
 make up        # core stack: postgres, minio, mlflow, api
@@ -177,6 +178,83 @@ of thing only a real end-to-end run surfaces):
 (`reports/evidently/`), built against the same champion training reference
 the live monitor uses.
 
+## The closed loop (Phase 4)
+
+With the ×3 amount shift still armed and the replay finished, the loop was
+closed end to end on 2026-09-29 (DAG run
+`manual__2026-09-29T09:47:58…IMjhkz5x`, all four tasks green):
+
+1. **Trigger** — `check_trigger` re-derives the retrain decision from the
+   monitor's persisted evidence using the same pure `should_retrain` the
+   monitor evaluates each cycle. Evidence at decision time: 5 top-20 features
+   above PSI 0.2 (worst: `id_31` 4.48, `log_TransactionAmt` 1.58), labelled
+   PR-AUC 0.989 → **0.494** and cost 117,360 → **232,603** per 100k on the
+   trailing labelled window; score PSI 0.019 (quiet, as in Phase 3).
+2. **Retrain** — the challenger trains on the original train split **plus the
+   released labelled stream** (injections re-applied, so it learns the drifted
+   regime), with its cost-optimal threshold tuned on a chronological labelled
+   slice just before the gate window — never on the window being judged.
+3. **Gate** — both models on the most recent fully-labelled window
+   (sim days 168–175, 19,943 transactions, features rebuilt with the live
+   injection applied). The champion is judged on the scores and decisions
+   **it actually served** (stored predictions joined to labels); the
+   challenger through its own pipeline at its own shipped threshold.
+
+| window sim days 168–175 (n = 19,943) | PR-AUC | cost / 100k |
+|---|---|---|
+| champion v1 (as served) | 0.494 | 232,603 |
+| challenger v3 (retrained) | 0.556 | **182,935** |
+| gate rule | PR-AUC must not drop | cost must improve ≥ 1% |
+
+**Decision: promoted** — cost improved 21.4% with PR-AUC up. The decision and
+both models' metrics are in the `promotion_log` table and in MLflow; the
+champion alias moved v1 → v3 and the challenger alias was cleared
+automatically.
+
+4. **Zero-downtime reload** — the API and the scorer pick the new champion up
+   through their alias pollers: `/model` showed v3 **16 seconds** after the
+   gate decision, `reload_count` incremented, no restart. Steady-state
+   `/score` latency on v3: **51–82 ms** over 10 requests (first request after
+   a reload pays ~1.3 s of lazy warmup). The monitor rebuilt its drift
+   reference for v3 on its next cycle.
+
+`make rollback` (or `make rollback TO=1` for an explicit version) restores an
+earlier champion through the same alias mechanism. The gate itself is a pure
+function with table-driven tests — promote, reject, tie-within-margin,
+PR-AUC-loss-blocks — plus registry-level tests for alias moves and rollback.
+
+**Why the orchestrator never loads a serving model.** Airflow installs
+fraudops under its own dependency constraints (numpy 1.x) while serving images
+install the project lock (numpy 2.x); cloudpickle artifacts embed numpy
+internals, so a serving-pickled model cannot be unpickled under Airflow
+(verified the hard way: `ModuleNotFoundError: numpy._core.numeric`). The DAG
+therefore reads the champion's reference metrics from its MLflow run, judges
+the champion on its stored production predictions, and only loads the
+challenger — the one model logged in that same container. Cross-checked: the
+stored-prediction metrics matched an independent rescore from raw exactly
+(PR-AUC 0.494, cost 232,603, n = 19,943). Pickles logged under Airflow load
+fine in the serving images (the compatible direction), with loud but harmless
+version-mismatch warnings.
+
+Two monitor bugs were found and fixed while wiring the gate (regression-tested
+in `tests/test_monitor.py`):
+
+1. **The labelled-performance set was empty by construction** — with a 7-day
+   window and a 7-day label delay, a prediction becomes labelable exactly when
+   it ages out of the window, so the labelled query returned zero rows and
+   performance monitoring silently never ran (the trigger had been firing on
+   feature PSI alone). The lookback now spans window + delay; the released-at
+   filter still decides visibility.
+2. **psycopg refuses plain dicts at JSONB placeholders** — every monitor cycle
+   aborted at insert once performance details were added. Wrapped in
+   `Json(...)`.
+
+The DAG is deliberately manual (`schedule=None`): the drift reference is the
+champion's original training distribution, so an injection that stays armed
+keeps the trigger hot — a schedule would retrain on every wake-up. The monitor
+exposes the trigger state as the `fraudops_drift_trigger` Prometheus gauge for
+an external scheduler; Phase 5 measures detection lag off exactly this signal.
+
 ## Phase 1 results — baseline (one command: `make train`)
 
 Chronological split in simulated days (0–119 / 120–149 / 150–182): train
@@ -249,6 +327,19 @@ evaluation.
   local-scale deployment, not a production Airflow topology; the fraudops
   package is installed under Airflow's constraint set, so its pandas/fastapi
   versions differ from the application lock file inside that one image.
+- **The full stack + retraining brushes the Docker-VM memory ceiling** (~8.6 GB
+  allocated): the retrain task peaks near 2 GB on top of Airflow, the monitor
+  (~2 GB) and the rest of the stack. One DAG run was killed by the kernel OOM
+  killer during task spawn before the monitor was stopped for the duration of
+  retraining — at real scale this is a capacity-planning number, not a
+  workaround. The one closed-loop run shown above completed with ~1 GB spare.
+- **Cross-environment model artifacts**: models logged under Airflow's
+  constraints load in the serving images with loud version-mismatch warnings
+  (cloudpickle/sklearn/numpy), not silently; the reverse direction fails
+  outright, which is why no Airflow task ever loads a serving model.
+- **One promotion is demonstrated**, not a long series: the loop's rejection
+  and tie paths are covered by unit tests on the pure gate function, but the
+  live run shown promoted on its first decision.
 
 Maintained honestly from day one (every claim must trace to a run):
 
