@@ -88,14 +88,23 @@ class Injector:
 
 
 def _row_to_event(row: pd.Series) -> dict:
+    """JSON-native event dict from a source row.
+
+    pandas 3 yields plain Python scalars from ``iterrows``/``items`` while
+    pandas 2 yields numpy scalars — accept both, and never let a number fall
+    through to ``str()`` (the consumer's feature pipeline needs real numerics;
+    only the API's Pydantic layer would silently coerce strings back).
+    """
     out = {}
     for key, value in row.items():
-        if isinstance(value, np.integer):
-            out[key] = int(value)
-        elif isinstance(value, np.floating):
-            out[key] = float(value) if not pd.isna(value) else None
+        if isinstance(value, bool | np.bool_):
+            out[key] = bool(value)
         elif pd.isna(value):
             out[key] = None
+        elif isinstance(value, int | np.integer):
+            out[key] = int(value)
+        elif isinstance(value, float | np.floating):
+            out[key] = float(value)
         else:
             out[key] = str(value)
     return out
@@ -226,6 +235,8 @@ def run_replay(
 
 
 def main() -> None:
+    import os
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bootstrap-servers", default="localhost:9092")
     parser.add_argument("--data-dir", type=Path, default=Path("data/raw"))
@@ -235,7 +246,10 @@ def main() -> None:
     )
     parser.add_argument("--max-events", type=int, default=None)
     parser.add_argument(
-        "--database-url", default=None, help="Postgres for label staging + drift injections"
+        "--database-url",
+        default=os.environ.get("DATABASE_URL"),
+        help="Postgres for label staging + drift injections (env: DATABASE_URL); "
+        "without it no labels are staged and drift injections are not applied",
     )
     parser.add_argument("--topic", default=KAFKA_TOPIC)
     parser.add_argument("--quiet", action="store_true")
