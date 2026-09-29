@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import threading
 import time
 
 import numpy as np
@@ -37,6 +38,8 @@ class BatchWriter:
         self.predictions: list[tuple] = []
         self.features: list[tuple] = []
         self._last_flush = time.monotonic()
+        # flushes also run on the watchdog thread, so serialise them
+        self._flush_lock = threading.Lock()
 
     def _ensure(self):
         if self.conn is None or self.conn.closed:
@@ -51,51 +54,52 @@ class BatchWriter:
         self.features.extend(rows)
 
     def maybe_flush(self, force: bool = False) -> None:
-        due = (
-            force
-            or len(self.predictions) >= self.flush_rows
-            or (self.predictions and time.monotonic() - self._last_flush >= self.flush_seconds)
-        )
-        if not due:
-            return
-        conn = self._ensure()
-        with conn.cursor() as cur:
-            if self.predictions:
-                cur.executemany(
-                    """
-                    INSERT INTO predictions
-                        (transaction_id, model_version, fraud_probability,
-                         decision, threshold, latency_ms, sim_ts)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s)
-                    """,
-                    self.predictions,
-                )
-            if self.features:
-                cur.executemany(
-                    """
-                    INSERT INTO prediction_features
-                        (transaction_id, sim_ts, feature, value_num, value_text)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    self.features,
-                )
-            max_dt = max((p[6] for p in self.predictions if p[6] is not None), default=None)
-            if max_dt is not None:
-                cur.execute(
-                    """
-                    INSERT INTO sim_clock (id, transaction_dt, updated_at)
-                    VALUES (1, %s, now())
-                    ON CONFLICT (id) DO UPDATE
-                    SET transaction_dt = GREATEST(sim_clock.transaction_dt,
-                                                   EXCLUDED.transaction_dt),
-                        updated_at = now()
-                    """,
-                    (int(max_dt),),
-                )
-        conn.commit()
-        self.predictions.clear()
-        self.features.clear()
-        self._last_flush = time.monotonic()
+        with self._flush_lock:
+            due = (
+                force
+                or len(self.predictions) >= self.flush_rows
+                or (self.predictions and time.monotonic() - self._last_flush >= self.flush_seconds)
+            )
+            if not due:
+                return
+            conn = self._ensure()
+            with conn.cursor() as cur:
+                if self.predictions:
+                    cur.executemany(
+                        """
+                        INSERT INTO predictions
+                            (transaction_id, model_version, fraud_probability,
+                             decision, threshold, latency_ms, sim_ts)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        self.predictions,
+                    )
+                if self.features:
+                    cur.executemany(
+                        """
+                        INSERT INTO prediction_features
+                            (transaction_id, sim_ts, feature, value_num, value_text)
+                        VALUES (%s, %s, %s, %s, %s)
+                        """,
+                        self.features,
+                    )
+                max_dt = max((p[6] for p in self.predictions if p[6] is not None), default=None)
+                if max_dt is not None:
+                    cur.execute(
+                        """
+                        INSERT INTO sim_clock (id, transaction_dt, updated_at)
+                        VALUES (1, %s, now())
+                        ON CONFLICT (id) DO UPDATE
+                        SET transaction_dt = GREATEST(sim_clock.transaction_dt,
+                                                       EXCLUDED.transaction_dt),
+                            updated_at = now()
+                        """,
+                        (int(max_dt),),
+                    )
+            conn.commit()
+            self.predictions.clear()
+            self.features.clear()
+            self._last_flush = time.monotonic()
 
     def close(self) -> None:
         self.maybe_flush(force=True)
@@ -148,6 +152,24 @@ def run_consumer(
     logger.info("champion v%s loaded (threshold %.4f)", loaded.version, loaded.bundle.threshold)
 
     writer = BatchWriter(database_dsn)
+
+    # DB durability must not depend on the main loop's health: poll(0.2) once
+    # blocked for 8+ minutes on a librdkafka-internal futex (SIGINT traceback
+    # pinned it at the poll call), and the last buffered predictions reached
+    # Postgres only thanks to the shutdown force-flush. A daemon thread keeps
+    # flushing whatever has been scored, every few seconds, regardless.
+    flush_stop = threading.Event()
+
+    def _flush_watchdog() -> None:
+        while not flush_stop.wait(5.0):
+            try:
+                writer.maybe_flush()
+            except Exception:  # noqa: BLE001 — never let the watchdog die
+                logger.exception("watchdog flush failed")
+
+    flusher = threading.Thread(target=_flush_watchdog, name="flush-watchdog", daemon=True)
+    flusher.start()
+
     consumer = Consumer(
         {
             "bootstrap.servers": bootstrap_servers,
@@ -188,6 +210,7 @@ def run_consumer(
                 ids,
                 failed_batches,
             )
+
     try:
         while True:
             message = consumer.poll(0.2)
@@ -197,6 +220,9 @@ def run_consumer(
                     _drain(buffer)
                     buffer.clear()
                     last_batch = time.monotonic()
+                # a partial tail must not wait for the next message (that may
+                # be hours away on a quiet topic) — flush it once we're idle
+                writer.maybe_flush()
                 # integration mode: stop once the expected batch arrived
                 if (
                     stop_after_messages is not None
@@ -221,6 +247,8 @@ def run_consumer(
     finally:
         if buffer:
             _drain(buffer)
+        flush_stop.set()
+        flusher.join(timeout=10)
         writer.close()
         consumer.close()
         holder.stop_polling()
