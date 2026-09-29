@@ -136,6 +136,8 @@ def run_consumer(
     batch_seconds: float = 1.0,
     poll_seconds: float = 30.0,
     stop_after_messages: int | None = None,
+    group_id: str = "fraudops-scorer",
+    topic: str = KAFKA_TOPIC,
 ) -> dict:
     from confluent_kafka import Consumer
 
@@ -149,26 +151,50 @@ def run_consumer(
     consumer = Consumer(
         {
             "bootstrap.servers": bootstrap_servers,
-            "group.id": "fraudops-scorer",
+            "group.id": group_id,
             "auto.offset.reset": "earliest",
             "enable.auto.commit": True,
         }
     )
-    consumer.subscribe([KAFKA_TOPIC])
+    # subscribe to the GIVEN topic: the live consumer and tests must be able
+    # to point at different topics — a test group with earliest reset once
+    # re-consumed the whole live topic and duplicated its predictions
+    consumer.subscribe([topic])
     holder.start_polling()
 
     buffer: list[dict] = []
     last_batch = time.monotonic()
     total = 0
+    failed_batches = 0
     idle_cycles = 0
+
+    def _drain(buf: list[dict]) -> None:
+        """Score one buffer; a poison batch is logged and skipped, never fatal.
+
+        One malformed event must not wedge the consumer forever: a crash here
+        would restart into the same offset and die in a loop. Drops are
+        counted, like the API's prediction sink.
+        """
+        nonlocal total, failed_batches
+        try:
+            _score_batch(buf, holder, writer, top_k)
+            total += len(buf)
+        except Exception:  # noqa: BLE001 — keep consuming after bad input
+            failed_batches += 1
+            ids = [e.get("TransactionID") for e in buf[:5]]
+            logger.exception(
+                "poison batch skipped (%d events, first ids %s) — batch #%d dropped",
+                len(buf),
+                ids,
+                failed_batches,
+            )
     try:
         while True:
             message = consumer.poll(0.2)
             if message is None:
                 idle_cycles += 1
                 if buffer and time.monotonic() - last_batch >= batch_seconds:
-                    _score_batch(buffer, holder, writer, top_k)
-                    total += len(buffer)
+                    _drain(buffer)
                     buffer.clear()
                     last_batch = time.monotonic()
                 # integration mode: stop once the expected batch arrived
@@ -186,8 +212,7 @@ def run_consumer(
             event = json.loads(message.value())
             buffer.append(event)
             if len(buffer) >= batch_max:
-                _score_batch(buffer, holder, writer, top_k)
-                total += len(buffer)
+                _drain(buffer)
                 buffer.clear()
                 last_batch = time.monotonic()
                 if total % 5000 < batch_max:
@@ -195,12 +220,11 @@ def run_consumer(
             writer.maybe_flush()
     finally:
         if buffer:
-            _score_batch(buffer, holder, writer, top_k)
-            total += len(buffer)
+            _drain(buffer)
         writer.close()
         consumer.close()
         holder.stop_polling()
-    return {"scored": total}
+    return {"scored": total, "failed_batches": failed_batches}
 
 
 def _score_batch(events: list[dict], holder, writer: BatchWriter, top_k: int) -> None:
@@ -254,6 +278,8 @@ def main() -> None:
         ),
     )
     parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--group-id", default="fraudops-scorer")
+    parser.add_argument("--topic", default=KAFKA_TOPIC)
     args = parser.parse_args()
     run_consumer(
         bootstrap_servers=args.bootstrap_servers,
@@ -261,6 +287,8 @@ def main() -> None:
         model_name=args.model_name,
         database_dsn=args.database_url,
         top_k=args.top_k,
+        group_id=args.group_id,
+        topic=args.topic,
     )
 
 
