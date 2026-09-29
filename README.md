@@ -10,15 +10,6 @@ trigger a challenger is retrained and promoted **only if it beats the
 champion on business cost** — every decision logged, reversible,
 rollback in one command.
 
-Final-year Data Science / ML-engineering portfolio project: everything that
-happens **after** a model is deployed. Runs entirely on Docker Compose
-(MinIO for S3-compatible storage, LocalStack for AWS emulation) — zero
-cloud spend.
-
-> **Integrity rule.** Every number below comes from a real run of this repo
-> and regenerates with the command shown next to it. Unflattering results
-> are reported anyway (see [Limitations](#limitations)).
-
 ## Headline results
 
 Measured on this repo (laptop: Ryzen 5 3500U, 16 GB RAM, Docker Desktop):
