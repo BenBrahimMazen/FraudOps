@@ -86,30 +86,30 @@ train: ## Local training run (host, sqlite tracking)
 
 
 replay: ## Replay the stream to Kafka (DAY_SECONDS=30 MAX= for caps)
-	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm replay \
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm replay \
 	    --bootstrap-servers kafka:29092 --data-dir /data/raw \
-	    --day-seconds $$(or $$(DAY_SECONDS),30) $$(if $$(MAX),--max-events $$(MAX),)
+	    --day-seconds $(or $(DAY_SECONDS),30) $(if $(MAX),--max-events $(MAX),)
 
 drift-amount: ## Inject an amount shift (FACTOR=3 FROM_DAY=165)
-	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm --entrypoint python replay \
 	    -m fraudops.monitoring.injector amount-factor \
-	    --factor $$(or $$(FACTOR),3) --from-day $$(or $$(FROM_DAY),165)
+	    --factor $(or $(FACTOR),3) --from-day $(or $(FROM_DAY),165)
 
 drift-nullify: ## Null features from a sim day (COLS=card4 FROM_DAY=165)
-	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm --entrypoint python replay \
 	    -m fraudops.monitoring.injector nullify \
-	    --columns "$$(or $$(COLS),card4)" --from-day $$(or $$(FROM_DAY),165)
+	    --columns "$(or $(COLS),card4)" --from-day $(or $(FROM_DAY),165)
 
 drift-list: ## List drift injections
-	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm --entrypoint python replay \
 	    -m fraudops.monitoring.injector list
 
 drift-off: ## Deactivate an injection (ID=1)
-	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
-	    -m fraudops.monitoring.injector deactivate --id $$(ID)
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm --entrypoint python replay \
+	    -m fraudops.monitoring.injector deactivate --id $(ID)
 
 report-evidently: ## HTML drift report for the last window
-	$$(COMPOSE) $$(FULL) $$(TOOLS) run --rm --entrypoint python replay \
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm --entrypoint python replay \
 	    -m fraudops.monitoring.evidently_report --data-dir /data/raw
 
 loadtest: ## Locust load test of the scoring API [Phase 5]
