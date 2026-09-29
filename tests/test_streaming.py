@@ -4,9 +4,42 @@ import numpy as np
 import pandas as pd
 
 from fraudops.streaming.labels import available_at_dt, release_due
-from fraudops.streaming.replay import Injector
+from fraudops.streaming.replay import Injector, _row_to_event
 
 SEC = 86_400
+
+
+class TestRowToEvent:
+    """Events must carry JSON-native types on BOTH pandas 2 (numpy scalars)
+    and pandas 3 (plain Python scalars from iterrows)."""
+
+    def test_python_scalars_stay_numeric(self) -> None:
+        row = pd.Series(
+            {"TransactionID": 1, "TransactionDT": 86_400, "TransactionAmt": 59.0, "card4": "visa"}
+        ).astype(object)
+        event = _row_to_event(row)
+        assert event["TransactionID"] == 1 and isinstance(event["TransactionID"], int)
+        assert event["TransactionDT"] == 86_400 and isinstance(event["TransactionDT"], int)
+        assert event["TransactionAmt"] == 59.0 and isinstance(event["TransactionAmt"], float)
+        assert event["card4"] == "visa"
+
+    def test_boxed_row_numerics_never_become_strings(self) -> None:
+        # a real row reaches _row_to_event via iterrows/iloc boxing: numpy
+        # scalars on pandas 2, python floats (ints upcast) on pandas 3 — the
+        # contract is "stays JSON-numeric", never str()
+        frame = pd.DataFrame(
+            {"TransactionID": [1], "TransactionDT": [86_400], "TransactionAmt": [59.0]}
+        )
+        event = _row_to_event(frame.iloc[0])
+        assert event["TransactionDT"] == 86_400
+        for key in ("TransactionID", "TransactionDT", "TransactionAmt"):
+            assert isinstance(event[key], int | float), f"{key} became {type(event[key])}"
+
+    def test_nan_becomes_null_and_bool_stays_bool(self) -> None:
+        row = pd.Series({"card2": float("nan"), "M1": True})
+        event = _row_to_event(row)
+        assert event["card2"] is None
+        assert event["M1"] is True
 
 
 class TestLabelDelay:
