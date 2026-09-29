@@ -75,8 +75,8 @@ status: ## Registry aliases + versions
 promote: ## Move champion alias to the challenger
 	$(COMPOSE) $(CORE) $(TOOLS) run --rm bootstrap promote
 
-rollback: ## Restore the previous champion
-	$(COMPOSE) $(CORE) $(TOOLS) run --rm bootstrap rollback
+rollback: ## Restore the previous champion (TO=1 for an explicit version)
+	$(COMPOSE) $(CORE) $(TOOLS) run --rm bootstrap rollback $(if $(TO),$(TO),)
 
 data: ## Validate dataset presence and shape
 	$(PY) python -m fraudops.data.check

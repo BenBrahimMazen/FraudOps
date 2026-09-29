@@ -98,6 +98,23 @@ CREATE TABLE IF NOT EXISTS prediction_features (
 );
 CREATE INDEX IF NOT EXISTS prediction_features_feature_idx
     ON prediction_features (feature, sim_ts);
+
+-- every champion/challenger gate decision (promote OR reject), with both
+-- models' metrics on the labelled window that justified it
+CREATE TABLE IF NOT EXISTS promotion_log (
+    id                  BIGSERIAL PRIMARY KEY,
+    decided_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    champion_version    INTEGER NOT NULL,
+    challenger_version  INTEGER NOT NULL,
+    champion_pr_auc     DOUBLE PRECISION,
+    champion_cost_100k  DOUBLE PRECISION,
+    challenger_pr_auc   DOUBLE PRECISION,
+    challenger_cost_100k DOUBLE PRECISION,
+    n_labelled          INTEGER NOT NULL,
+    window_desc         TEXT NOT NULL,
+    decision            TEXT NOT NULL,
+    reason              TEXT NOT NULL
+);
 """
 
 
