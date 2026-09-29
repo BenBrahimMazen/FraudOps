@@ -195,11 +195,15 @@ def run_replay(
         event = _row_to_event(row)
         event.pop("isFraud", None)  # labels NEVER travel on the topic
         event = injector.apply(event, int(dt // SECONDS_PER_DAY))
+        # NO timestamp arg: Kafka reads it as epoch-ms, but dt is dataset-epoch
+        # SECONDS (0..15.8M) — stamped 1970-01-01, every segment looked older
+        # than retention and the 5-min sweep deleted them mid-replay, silently
+        # skipping offsets under the lagging consumer. Sim time travels in the
+        # payload (TransactionDT); broker-side timestamps stay wall-clock.
         producer.produce(
             topic,
             key=str(event["TransactionID"]).encode(),
             value=json.dumps(event).encode(),
-            timestamp=dt,
         )
         delivered += 1
         batch_frames.append(row)
