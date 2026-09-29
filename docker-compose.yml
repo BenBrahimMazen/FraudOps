@@ -193,6 +193,9 @@ services:
       context: .
       dockerfile: infra/docker/api/Dockerfile
     profiles: [full]
+    # a wedged consumer must come back on its own (poll() once hung on a
+    # librdkafka futex and silently stopped scoring; SIGINT-recovered)
+    restart: unless-stopped
     depends_on:
       kafka:
         condition: service_healthy
