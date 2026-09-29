@@ -168,4 +168,4 @@ demo-run: ## Run the demo image on http://localhost:7860 (docs at /docs)
 	docker run --rm -p 7860:7860 --name fraudops-demo fraudops-demo
 
 demo-deploy: ## Upload the demo to a HF Space (HF_TOKEN + SPACE_ID in .env)
-	$(PY) python demo/deploy.py
+	$(PY) $(if $(wildcard .env),--env-file .env,) python demo/deploy.py
