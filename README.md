@@ -23,10 +23,56 @@ model is deployed.
 | 3 | Kafka replay, delayed labels, drift monitoring | done |
 | 4 | Closed loop: trigger → retrain → gate → promote/rollback | done |
 | 5 | Experiments, load testing, figures | done |
-| 6 | Terraform/LocalStack, CI/CD polish | pending |
+| 6 | Terraform/LocalStack, CI/CD polish | done |
 
 Every metric below comes from a real run and can be regenerated with the
 command shown; nothing is estimated.
+
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph sim["Replay & drift injection (tools profile)"]
+        RAW["IEEE-CIS CSVs<br/>(data/raw, gitignored)"]
+        PROD["Kafka replay producer<br/>(sim clock, speed-up factor)"]
+        INJ["Drift injector CLI<br/>(amount xN / nullify)"]
+        RAW --> PROD
+        INJ -.-> PROD
+    end
+
+    subgraph full["Closed loop (full profile)"]
+        KAFKA["Kafka topic: transactions"]
+        SCORER["Scoring consumer<br/>(champion bundle in-process)"]
+        LABELS["Label-release job<br/>(labels visible after 7 sim days)"]
+        MON["Drift monitor<br/>PSI/KS on features + scores,<br/>rolling cost on visible labels"]
+        AIRFLOW["Airflow DAGs<br/>train / retrain_on_drift"]
+        MLFLOW["MLflow registry<br/>champion / challenger aliases"]
+    end
+
+    subgraph core["Serving stack (core profile)"]
+        API["FastAPI /score<br/>LightGBM + SHAP reason codes"]
+        PG[("Postgres: predictions, labels,<br/>drift, promotion_log")]
+    end
+
+    subgraph obs["Observability"]
+        PROM["Prometheus"]
+        GRAF["Grafana dashboards"]
+    end
+
+    PROD --> KAFKA --> SCORER --> PG
+    LABELS --> PG
+    PG --> MON
+    MON -->|"alert"| AIRFLOW
+    AIRFLOW -->|"train, register challenger"| MLFLOW
+    AIRFLOW -->|"cost gate: promote or reject"| MLFLOW
+    MLFLOW -->|"champion alias, hot reload"| SCORER
+    MON --> PROM --> GRAF
+    API --> PG
+```
+
+One feature pipeline is shared by training and serving (parity-tested), and
+the threshold ships inside the model bundle, so the decision rule cannot
+diverge between them.
 
 ## Quickstart (current state)
 
@@ -36,12 +82,13 @@ Requirements: Python 3.11, [`uv`](https://docs.astral.sh/uv/), GNU `make`
 ```bash
 uv sync        # or: make install — create the locked virtualenv
 make lint      # ruff check + format check
+make typecheck # mypy over src/fraudops
 make test      # pytest (140 tests: unit, leakage, parity, gate, integration)
 make data      # validate the two CSVs in data/raw/
 make train     # local run: load -> split -> features -> LightGBM -> threshold -> evaluation -> MLflow
 make up        # core stack: postgres, minio, mlflow, api
 make bootstrap # train + register + set the first champion (inside the stack)
-make up-full   # + airflow (single container, LocalExecutor, Postgres metadata)
+make up-full   # + airflow, kafka, scorer, labels, monitor, prometheus, grafana
 ```
 
 Exploration notebook: `notebooks/01_eda.ipynb` (executed outputs committed).
@@ -419,6 +466,48 @@ honest consequence of the anonymised schema (see Limitations), and the
 borderline case shows why: `card1` pushing +1.2 toward fraud with no
 business gloss a reviewer could act on.
 
+## Infrastructure as Code (Phase 6)
+
+`infra/terraform/` describes a plausible AWS deployment of the serving side:
+an S3 bucket for MLflow artifacts (versioned, SSE, lifecycle), ECR + ECS
+Fargate (2 tasks) behind an ALB with `/health` checks, least-privilege IAM
+execution/task roles, and a CloudWatch log group. Managed services (RDS, MSK,
+the MLflow server) are deliberately *not* described — their endpoints are
+injected through `var.api_environment`, as they would be at real scale.
+
+**This has never been applied to real AWS.** The provider block is pinned to
+a LocalStack endpoint variable with all credential/metadata checks skipped,
+and the apply evidence below comes from the containerized workflow:
+
+```bash
+make tf-init     # terraform init inside hashicorp/terraform:1.9 (nothing on the host)
+make tf-validate # terraform validate
+make tf-apply    # docker compose --profile tools up -d localstack, then apply
+```
+
+What applied to LocalStack (Community license — zero cost, no token):
+**11 resources, 0 errors** — S3 bucket + versioning + SSE + lifecycle, IAM
+execution role (+ managed policy), task role (+ read-only artifacts policy),
+CloudWatch log group, both security groups.
+
+The ECR/ECS/ALB layer is gated behind `enable_compute` (default `false`)
+because LocalStack Community does not implement ECS or ELBv2 — both require
+the paid Pro license, which the zero-cost rule rules out — and its ECR
+rejects the static test credentials. That layer is verified by
+`terraform validate` in CI and by:
+
+```bash
+make tf-plan-compute   # terraform plan -var enable_compute=true -> 7 to add
+```
+
+Two LocalStack quirks were hit and worked around or documented (this is
+what "applied against LocalStack" actually teaches): Moto does not implement
+the `default-vpc` DescribeSubnets filter (equivalent `vpc-id` filter used),
+and lifecycle-configuration creation takes ~55 s to settle.
+
+State stays local (`infra/terraform/*.tfstate*` is gitignored); the provider
+lock file `.terraform.lock.hcl` is committed for reproducibility.
+
 ## Phase 1 results — baseline (one command: `make train`)
 
 Chronological split in simulated days (0–119 / 120–149 / 150–182): train
@@ -450,6 +539,25 @@ Honest reading:
   threshold-sensitivity experiment (Phase 5) quantifies this trade-off.
 - Degradation from validation to stream (PR-AUC 0.595 → 0.500) is the natural
   drift the monitoring phase will track and the retraining loop will act on.
+
+## Reproducing every number
+
+| Claim / artifact | Command (prereqs: `uv sync`, data in `data/raw/`) |
+|---|---|
+| Baseline table (PR-AUC, cost/100k, baselines) | `make train` → `reports/` |
+| Decay curve (fig. 1) | `make report` → `reports/figures/decay_curve.{csv,png}` |
+| Retraining policies (fig. 2) | `make report` → `retrain_comparison.{csv,png}` |
+| Threshold sensitivity (fig. 3) | `make report` → `threshold_sensitivity.{csv,png}` |
+| Detection lag (fig. 4) | `make report` → `detection_lag.{csv,png}` |
+| Load-test envelope (fig. 5) | `make loadtest USERS=50 RUN_TIME=2m` → `reports/figures/locust_*` |
+| SHAP summary + reason codes (fig. 6) | `make report` → `shap_summary.png`, `reason_codes.md` |
+| Closed-loop demo (alert → retrain → gate → promote) | `make up-full`, inject drift, let `retrain_on_drift` fire; `promotion_log` + `make status` |
+| Terraform apply evidence | `make tf-apply` (LocalStack only; see Phase 6) |
+| Test / lint / typecheck | `make test` / `make lint` / `make typecheck` |
+
+Figures regenerate from raw data in one command; nothing is drawn or
+transcribed by hand. Model retraining reports re-fit challengers on the
+historical stream using the same as-of label visibility the live loop uses.
 
 ## Dataset
 
@@ -506,6 +614,12 @@ evaluation.
 - **One promotion is demonstrated**, not a long series: the loop's rejection
   and tie paths are covered by unit tests on the pure gate function, but the
   live run shown promoted on its first decision.
+- **Terraform's compute layer is validate/plan-verified only**: LocalStack
+  Community (the zero-cost license) does not implement ECS or ELBv2, so the
+  ECR/ECS/ALB resources have never been created by an apply — see Phase 6.
+- **CI is static**: lint, type-check, unit tests, Docker build and
+  `terraform validate` — the compose-stack integration path (Kafka replay,
+  promotion gate on a live registry) runs locally, not in GitHub Actions.
 
 Maintained honestly from day one (every claim must trace to a run):
 
@@ -521,3 +635,40 @@ Maintained honestly from day one (every claim must trace to a run):
   download instructions, never data.
 - **Not for real use.** Research/portfolio project, not intended for real
   financial decisions.
+
+## What I would do at real scale
+
+Grounded in what this project actually measured, not generic advice:
+
+- **Serving**: the measured ~13–15 req/s ceiling per worker is GIL-bound
+  (Pydantic validation + pandas transform + TreeSHAP). At real volume I would
+  first run N Uvicorn workers / ECS tasks (the model is ~MBs, one copy per
+  process is fine — the Terraform layer already models `desired_count = 2`
+  for this reason), then move the hot path off pandas (typed row → numpy),
+  pre-size SHAP to top-k features, and only then consider ONNX or a compiled
+  scorer. The p95 < 100 ms target was met per-request; it is *throughput*
+  that needs the scale-out.
+- **Labels**: the 7-day delayed-label dance was the project's central
+  constraint — every evaluation is as-of a simulated clock. In production the
+  label source would be chargebacks/investigation outcomes with real
+  arrival-time semantics, and the as-of join (already the shape of
+  `labelled_stream_frame`) becomes the most business-critical code in the
+  repo.
+- **Streaming**: one Kafka partition was fine for a replay; real ingestion
+  would key transactions by card/account so per-entity features (velocity,
+  spend patterns) become possible — the deliberate small feature set here
+  has no entity aggregations.
+- **Retraining cadence**: the retraining-policy experiment showed
+  drift-triggered beat fixed schedules mainly because the trigger fired
+  *sooner* after the shift; with real label delays the lever is shortening
+  feedback latency (faster label release), not more aggressive triggers.
+- **Deployment safety**: promotions here flip one alias with a gate; at real
+  scale I would shadow-score the challenger on live traffic before any
+  promote, canary the new threshold (alert-rate budget!), and keep the
+  rollback runbook automated — the cost curve is very sensitive to threshold
+  moves (see the sensitivity figure).
+- **Infrastructure**: SSM/Secrets Manager for the admin token (the tf file
+  carries a placeholder), private subnets + NAT instead of the default VPC
+  with public IPs, MSK/RDS/MLflow as managed endpoints, and the drift
+  injector replaced by replaying *real* historical incidents as regression
+  fixtures.
