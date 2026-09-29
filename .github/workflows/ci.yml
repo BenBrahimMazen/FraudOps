@@ -26,5 +26,41 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
 
+      - name: Type-check (mypy)
+        run: uv run mypy
+
       - name: Test (pytest)
         run: uv run pytest
+
+  docker-build:
+    # build-only: proves the serving image compiles; never pushes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build the API image
+        run: docker build -f infra/docker/api/Dockerfile .
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (no backend, provider download only)
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        run: terraform validate
