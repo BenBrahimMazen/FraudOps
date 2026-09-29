@@ -26,12 +26,14 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import yaml
 
 os.environ.setdefault("MLFLOW_DISABLE_AGENT_HINT", "1")  # keep run logs clean
 
 import mlflow  # noqa: E402
+from lightgbm import LGBMClassifier  # noqa: E402
 
 from fraudops.data.clock import sim_day
 from fraudops.data.loader import load_joined
@@ -58,29 +60,41 @@ def labelled_stream_frame(
     conn,
     data_dir: Path,
     configs_dir: Path,
+    as_of_dt: int | None = None,
 ) -> tuple[pd.DataFrame, int]:
     """Stream rows whose labels are released, with truth attached.
 
     Returns (frame, cutoff_dt) where cutoff_dt is the latest released
     transaction's TransactionDT — everything after it has no visible label
     yet and must not enter training.
+
+    ``as_of_dt`` replays the past: only labels already visible at that
+    simulated time enter the frame (the same visibility rule the release job
+    enforces), with cutoff ``as_of_dt - delay``. Retrospective experiments
+    (reports) use it to rebuild exactly what a retrain at that moment could
+    have seen; the live path leaves it None.
     """
     splits_cfg = _load_yaml(configs_dir / "splits.yaml")
+    delay_days = int(_load_yaml(configs_dir / "drift.yaml").get("label_delay_days", 7))
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT MAX(available_at_dt - %s * %s) FROM labels
-            """,
-            (
-                int(_load_yaml(configs_dir / "drift.yaml").get("label_delay_days", 7)),
-                SECONDS_PER_DAY,
-            ),
-        )
-        cutoff_dt = cur.fetchone()[0]
-        if not cutoff_dt:
-            raise RuntimeError("no labels released yet — nothing to retrain on")
-        cur.execute("SELECT transaction_id, is_fraud, amount FROM labels")
+        if as_of_dt is None:
+            cur.execute(
+                "SELECT MAX(available_at_dt - %s * %s) FROM labels",
+                (delay_days, SECONDS_PER_DAY),
+            )
+            cutoff_dt = cur.fetchone()[0]
+            if not cutoff_dt:
+                raise RuntimeError("no labels released yet — nothing to retrain on")
+            cur.execute("SELECT transaction_id, is_fraud, amount FROM labels")
+        else:
+            cutoff_dt = as_of_dt - delay_days * SECONDS_PER_DAY
+            cur.execute(
+                "SELECT transaction_id, is_fraud, amount FROM labels WHERE available_at_dt <= %s",
+                (as_of_dt,),
+            )
         rows = cur.fetchall()
+        if not rows:
+            raise RuntimeError(f"no labels visible as of TransactionDT {as_of_dt:,}")
 
     truth = pd.DataFrame(rows, columns=["TransactionID", "is_fraud", "amount"])
     df = load_joined(data_dir / "train_transaction.csv", data_dir / "train_identity.csv")
@@ -122,6 +136,42 @@ def split_labelled_stream(
     assert max_extra < min_val, f"leakage: extra-train max {max_extra} >= val min {min_val}"
     assert max_val < min_eval, f"leakage: val max {max_val} >= eval min {min_eval}"
     return slices
+
+
+def fit_challenger(
+    train_frame: pd.DataFrame,
+    val_frame: pd.DataFrame,
+    val_amounts: np.ndarray,
+    model_cfg: dict,
+    false_alert_cost: float,
+) -> tuple[LGBMClassifier, FeaturePipeline, float]:
+    """Fit pipeline + model on ``train_frame``, tune the cost-optimal
+    threshold on ``val_frame`` (chronologically AFTER the training rows).
+
+    Frames need the raw ``isFraud`` column (both the base split and the
+    labelled-stream frames carry it). Shared by the live DAG path and the
+    retrospective retraining experiments so both fit identically.
+    """
+    pipeline = FeaturePipeline(use_v_columns=bool(model_cfg["features"]["use_v_columns"]))
+    X_train = pipeline.fit_transform(train_frame)
+    X_val = pipeline.transform(val_frame)
+    y_train = train_frame["isFraud"].to_numpy()
+    y_val = val_frame["isFraud"].to_numpy()
+
+    pos = float(y_train.sum())
+    scale_pos_weight = float((len(y_train) - pos) / max(pos, 1.0))
+    model = LGBMClassifier(
+        random_state=int(model_cfg["seed"]), scale_pos_weight=scale_pos_weight, **model_cfg["lgbm"]
+    )
+    model.fit(X_train, y_train)
+
+    threshold = optimal_cost_threshold(
+        y_val,
+        np.asarray(val_amounts, dtype="float64"),
+        model.predict_proba(X_val)[:, 1],
+        false_alert_cost,
+    )
+    return model, pipeline, float(threshold)
 
 
 def train_challenger(
@@ -166,40 +216,26 @@ def train_challenger(
     )
 
     # ------------------------------------------------------------- features
-    use_v = bool(model_cfg["features"]["use_v_columns"])
-    pipeline = FeaturePipeline(use_v_columns=use_v)
-    X_train = pipeline.fit_transform(train_frame)
+    print("training LightGBM challenger ...", flush=True)
+    t0 = time.perf_counter()
+    model, pipeline, threshold = fit_challenger(
+        train_frame,
+        slices["retrain_val"],
+        slices["retrain_val"]["amount"].to_numpy(dtype="float64"),
+        model_cfg,
+        false_alert_cost,
+    )
+    print(f"  trained in {time.perf_counter() - t0:.1f}s")
+
     X_val = pipeline.transform(slices["retrain_val"])
     X_eval = pipeline.transform(slices["gate_eval"])
-    y_train = train_frame["isFraud"].to_numpy()
     y_val = slices["retrain_val"]["is_fraud"].to_numpy()
     y_eval = slices["gate_eval"]["is_fraud"].to_numpy()
-
-    # ---------------------------------------------------------------- model
-    print("training LightGBM challenger ...", flush=True)
-    from lightgbm import LGBMClassifier
-
-    pos = float(y_train.sum())
-    scale_pos_weight = float((len(y_train) - pos) / max(pos, 1.0))
-    model = LGBMClassifier(
-        random_state=seed, scale_pos_weight=scale_pos_weight, **model_cfg["lgbm"]
-    )
-    t0 = time.perf_counter()
-    model.fit(X_train, y_train)
-    print(f"  trained in {time.perf_counter() - t0:.1f}s")
 
     scores = {
         "retrain_val": model.predict_proba(X_val)[:, 1],
         "gate_eval": model.predict_proba(X_eval)[:, 1],
     }
-
-    # threshold on the (drifted, chronological) retrain validation slice
-    threshold = optimal_cost_threshold(
-        y_val,
-        slices["retrain_val"]["amount"].to_numpy(dtype="float64"),
-        scores["retrain_val"],
-        false_alert_cost,
-    )
     print(f"cost-optimal threshold (retrain validation): {threshold:.4f}")
 
     fpr_target = float(costs_cfg.get("recall_fpr_target", 0.01))
@@ -227,7 +263,7 @@ def train_challenger(
         "false_alert_cost": false_alert_cost,
         "train_days": splits_cfg["train_days"],
         "val_days": splits_cfg["val_days"],
-        "n_features": X_train.shape[1],
+        "n_features": X_val.shape[1],
         "seed": seed,
         "trained_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "retrain": {
