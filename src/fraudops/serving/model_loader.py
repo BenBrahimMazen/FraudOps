@@ -118,4 +118,6 @@ class ModelHolder:
 
 def _run_id_for(client: MlflowClient, name: str, version: str) -> str:
     mv = client.get_model_version(name, version)
+    if mv.run_id is None:  # registry rows always carry one; satisfy the stubs
+        raise RuntimeError(f"model version {name}/{version} has no source run")
     return mv.run_id

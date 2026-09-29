@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -33,7 +34,7 @@ WINDOW_DAYS = 7
 WARNING = 0.1
 ALERT = 0.2
 
-SCENARIOS = [
+SCENARIOS: list[tuple[str, dict[str, Any], str]] = [
     (
         "amount ×1.5",
         {"kind": "amount_factor", "params": {"factor": 1.5}, "from_day": 165},
@@ -95,7 +96,7 @@ def main() -> None:
     day = (stream["TransactionDT"] // SECONDS_PER_DAY).astype(int).to_numpy()
     end_days = list(range(stream_start + WINDOW_DAYS, int(day.max()) + 1))
 
-    rows = []
+    rows: list[dict[str, Any]] = []
     for label, injection, affected in SCENARIOS:
         injected = apply_injections_frame(stream, [injection])
         X = bundle.pipeline.transform(injected)

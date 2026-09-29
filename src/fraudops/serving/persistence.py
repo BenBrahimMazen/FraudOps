@@ -140,6 +140,7 @@ class PredictionSink:
 
     def _ensure_connection(self) -> None:
         if self._conn is None or self._conn.closed:
+            assert self.dsn is not None  # the writer thread only runs when enabled
             self._conn = psycopg.connect(self.dsn, autocommit=False)
             self._conn.execute(DDL)
             self._conn.commit()

@@ -10,13 +10,14 @@ FULL := --profile full
 TOOLS := --profile tools
 
 .DEFAULT_GOAL := help
-.PHONY: help install lint format test precommit up down up-full bootstrap status \
+.PHONY: help install lint typecheck format test precommit up down up-full bootstrap status \
         promote rollback logs data train replay drift loadtest report
 
 help: ## List available targets
 	@echo "FraudOps Makefile targets:"
 	@echo "  install    - create/refresh the locked virtualenv (uv sync)"
 	@echo "  lint       - ruff check + format check"
+	@echo "  typecheck  - mypy over the package"
 	@echo "  format     - apply ruff autofixes and formatting"
 	@echo "  test       - run the pytest suite"
 	@echo "  precommit  - run all pre-commit hooks"
@@ -43,6 +44,9 @@ install: ## Create/refresh the locked virtualenv
 lint: ## Ruff lint + format check
 	$(PY) ruff check .
 	$(PY) ruff format --check .
+
+typecheck: ## mypy over the package (config in pyproject.toml)
+	$(PY) mypy
 
 format: ## Apply ruff autofixes and formatting
 	$(PY) ruff check --fix .

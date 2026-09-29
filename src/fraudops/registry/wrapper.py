@@ -8,6 +8,8 @@ serving layer.
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pandas as pd
 from mlflow.pyfunc import PythonModel
@@ -44,7 +46,9 @@ class FraudOpsModel(PythonModel):
         return np.asarray(scores) >= self.threshold
 
     # --------------------------------------------------------- pyfunc contract
-    def predict(self, context, model_input: pd.DataFrame) -> np.ndarray:
+    def predict(
+        self, context: Any, model_input: pd.DataFrame, params: Any | None = None
+    ) -> np.ndarray:
         """MLflow pyfunc contract: P(fraud) per row."""
         return self.score_raw(model_input)
 

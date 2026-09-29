@@ -235,7 +235,10 @@ def run_consumer(
             if message.error():
                 logger.warning("kafka: %s", message.error())
                 continue
-            event = json.loads(message.value())
+            value = message.value()
+            if value is None:
+                continue
+            event = json.loads(value)
             buffer.append(event)
             if len(buffer) >= batch_max:
                 _drain(buffer)

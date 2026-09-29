@@ -24,6 +24,7 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import yaml
 
@@ -109,7 +110,7 @@ def train_baseline(
     model.fit(X[TRAIN], y[TRAIN])
     print(f"  trained in {time.perf_counter() - t0:.1f}s")
 
-    scores = {name: model.predict_proba(X[name])[:, 1] for name in splits}
+    scores = {name: np.asarray(model.predict_proba(X[name]))[:, 1] for name in splits}
 
     # ------------------------------------------------- threshold on validation
     threshold = optimal_cost_threshold(

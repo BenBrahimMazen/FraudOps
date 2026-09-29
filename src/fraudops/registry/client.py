@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from typing import cast
 
 import mlflow
 from mlflow.exceptions import MlflowException
@@ -110,7 +111,7 @@ def status(client: MlflowClient) -> dict:
             }
             for mv in client.search_model_versions(f"name='{model_name()}'")
         ),
-        key=lambda v: v["version"],
+        key=lambda v: cast(int, v["version"]),  # version is int by construction
         reverse=True,
     )
     return {"model_name": model_name(), "aliases": aliases, "versions": versions[:10]}

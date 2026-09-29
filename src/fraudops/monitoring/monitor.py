@@ -248,10 +248,10 @@ def persist_results(
     feature_results: list[DriftResult],
     score_result: DriftResult,
     perf: PerformanceSnapshot | None,
-) -> list[tuple[str, str, str, str]]:
+) -> list[tuple[str, str, str]]:
     """Write monitoring_results + drift_alerts; return the alert tuples."""
-    alerts: list[tuple[str, str, str, str]] = []
-    rows = []
+    alerts: list[tuple[str, str, str]] = []
+    rows: list[tuple] = []
     for result in feature_results + [score_result]:
         rows.append(
             (

@@ -87,11 +87,12 @@ def load_bundle(version: int | None = None):
     load_env()
     mlflow.set_tracking_uri(tracking_uri())
     if version is None:
-        version = rc.get_version_by_alias(rc.configure(tracking_uri()), rc.CHAMPION)
-        if version is None:
+        resolved = rc.get_version_by_alias(rc.configure(tracking_uri()), rc.CHAMPION)
+        if resolved is None:
             raise RuntimeError("no champion registered — run bootstrap first")
+        version = int(resolved)
     pyfunc = mlflow.pyfunc.load_model(f"models:/{rc.model_name()}/{version}")
-    return FraudOpsModel.unwrap(pyfunc), int(version)
+    return FraudOpsModel.unwrap(pyfunc), version
 
 
 def model_metrics(version: int) -> dict[str, float]:
@@ -105,6 +106,8 @@ def model_metrics(version: int) -> dict[str, float]:
     mlflow.set_tracking_uri(tracking_uri())
     cli = mlflow.tracking.MlflowClient(tracking_uri=tracking_uri())
     run_id = cli.get_model_version(rc.model_name(), str(version)).run_id
+    if run_id is None:
+        raise RuntimeError(f"model version {version} has no source run")
     return dict(cli.get_run(run_id).data.metrics)
 
 

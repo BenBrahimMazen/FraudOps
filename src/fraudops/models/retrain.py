@@ -168,7 +168,7 @@ def fit_challenger(
     threshold = optimal_cost_threshold(
         y_val,
         np.asarray(val_amounts, dtype="float64"),
-        model.predict_proba(X_val)[:, 1],
+        np.asarray(model.predict_proba(X_val))[:, 1],
         false_alert_cost,
     )
     return model, pipeline, float(threshold)
@@ -233,8 +233,8 @@ def train_challenger(
     y_eval = slices["gate_eval"]["is_fraud"].to_numpy()
 
     scores = {
-        "retrain_val": model.predict_proba(X_val)[:, 1],
-        "gate_eval": model.predict_proba(X_eval)[:, 1],
+        "retrain_val": np.asarray(model.predict_proba(X_val))[:, 1],
+        "gate_eval": np.asarray(model.predict_proba(X_eval))[:, 1],
     }
     print(f"cost-optimal threshold (retrain validation): {threshold:.4f}")
 

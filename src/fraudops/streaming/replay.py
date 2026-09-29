@@ -20,6 +20,7 @@ import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -28,6 +29,9 @@ import yaml
 from fraudops.data.clock import sim_day
 from fraudops.data.loader import load_joined
 from fraudops.storage import ensure_schema
+
+if TYPE_CHECKING:
+    from psycopg import Connection
 
 KAFKA_TOPIC = "transactions"
 SECONDS_PER_DAY = 86_400
@@ -44,18 +48,22 @@ class Injector:
     def __init__(self, dsn: str | None, poll_seconds: float = 5.0) -> None:
         self.dsn = dsn
         self.poll_seconds = poll_seconds
-        self._conn = None
+        self._conn: Connection | None = None
         self._next_poll = 0.0
         self._injections: list[dict] = []
 
     def _refresh(self) -> None:
+        if not self.dsn:
+            return  # no Postgres configured: injections stay off
         try:
             import psycopg
 
-            if self._conn is None or self._conn.closed:
-                self._conn = psycopg.connect(self.dsn, autocommit=True)
-                ensure_schema(self._conn)
-            with self._conn.cursor() as cur:
+            conn = self._conn
+            if conn is None or conn.closed:
+                conn = psycopg.connect(self.dsn, autocommit=True)
+                ensure_schema(conn)
+                self._conn = conn
+            with conn.cursor() as cur:
                 cur.execute(
                     "SELECT kind, params, from_sim_day FROM drift_injections"
                     " WHERE active ORDER BY id"
@@ -95,7 +103,7 @@ def _row_to_event(row: pd.Series) -> dict:
     through to ``str()`` (the consumer's feature pipeline needs real numerics;
     only the API's Pydantic layer would silently coerce strings back).
     """
-    out = {}
+    out: dict[str, object] = {}
     for key, value in row.items():
         if isinstance(value, bool | np.bool_):
             out[key] = bool(value)
