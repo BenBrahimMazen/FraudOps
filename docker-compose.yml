@@ -291,7 +291,37 @@ services:
     ports:
       - "${GRAFANA_PORT:-3000}:3000"
 
+  localstack:
+    # AWS emulation for the terraform workflow — `make tf-apply` targets
+    # this, NEVER real AWS. Community edition: no token needed.
+    image: localstack/localstack:4.14
+    profiles: [tools]
+    environment:
+      SERVICES: s3,iam,ec2,ecs,logs,elasticloadbalancing
+      DEBUG: "0"
+    ports:
+      - "${LOCALSTACK_PORT:-4566}:4566"
+    volumes:
+      - localstack-data:/var/lib/localstack
+
+  terraform:
+    # containerized terraform so nothing installs on the host; state stays
+    # in infra/terraform/ (gitignored) via the workspace mount. The image's
+    # own entrypoint wraps `terraform "$@"`, so `run --rm terraform init`
+    # just works.
+    image: hashicorp/terraform:1.9
+    profiles: [tools]
+    working_dir: /workspace
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: eu-west-1
+      TF_IN_AUTOMATION: "1"
+    volumes:
+      - ./infra/terraform:/workspace
+
 volumes:
   pgdata:
   minio-data:
   airflow-logs:
+  localstack-data:

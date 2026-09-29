@@ -11,7 +11,8 @@ TOOLS := --profile tools
 
 .DEFAULT_GOAL := help
 .PHONY: help install lint typecheck format test precommit up down up-full bootstrap status \
-        promote rollback logs data train replay drift loadtest report
+        promote rollback logs data train replay drift loadtest report \
+        tf-init tf-validate tf-plan tf-plan-compute tf-apply tf-destroy
 
 help: ## List available targets
 	@echo "FraudOps Makefile targets:"
@@ -37,6 +38,9 @@ help: ## List available targets
 	@echo "  report-evidently - HTML drift report for the last window"
 	@echo "  loadtest   - Locust load test of /score               [Phase 5]"
 	@echo "  report     - regenerate all figures and tables        [Phase 5]"
+	@echo "  tf-*       - terraform (containerized): init/validate/plan/apply"
+	@echo "               against LocalStack ONLY - never real AWS"
+	@echo "  tf-plan-compute - plan the ECR/ECS/ALB layer (Pro-gated in LocalStack, plan-only)"
 
 install: ## Create/refresh the locked virtualenv
 	uv sync
@@ -67,7 +71,7 @@ up-full: ## Start the full stack (adds airflow on :8080)
 	@echo "airflow: http://localhost:8080 (admin password: docker compose exec airflow cat ~/standalone_admin_password.txt)"
 
 down: ## Stop the whole stack
-	$(COMPOSE) $(CORE) $(FULL) down
+	$(COMPOSE) $(CORE) $(FULL) $(TOOLS) down
 
 logs: ## Tail stack logs
 	$(COMPOSE) $(CORE) $(FULL) logs -f --tail 100
@@ -128,3 +132,24 @@ report: ## Regenerate every figure and table from raw data [Phase 5]
 loadtest: ## Locust load test of /score (USERS=50 RUN_TIME=2m) [Phase 5]
 	$(PY) locust -f loadtest/locustfile.py --headless -u $(USERS) -r 5 -t $(RUN_TIME) \
 	    --host http://localhost:8000 --csv reports/figures/locust --only-summary 2>&1 | tail -12
+
+tf-init: ## terraform init (downloads the AWS provider into a container)
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm terraform init
+
+tf-validate: ## terraform validate (no AWS contact at all)
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm terraform validate
+
+tf-plan: ## plan against LocalStack ONLY - never real AWS
+	$(COMPOSE) $(FULL) $(TOOLS) up -d localstack
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm terraform plan
+
+tf-plan-compute: ## plan the ECR/ECS/ALB layer (validate+plan only; see infra/terraform/serving.tf)
+	$(COMPOSE) $(FULL) $(TOOLS) up -d localstack
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm terraform plan -var enable_compute=true
+
+tf-apply: ## apply against LocalStack ONLY - never real AWS
+	$(COMPOSE) $(FULL) $(TOOLS) up -d localstack
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm terraform apply -auto-approve
+
+tf-destroy: ## tear the LocalStack resources back down
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm terraform destroy -auto-approve

@@ -47,3 +47,11 @@ Thumbs.db
 # generated reports (evidently HTML, figures) — anchored: must not match
 # src/fraudops/reports/ (the code that generates them)
 /reports/
+
+# --- Terraform (LocalStack runs only; state is local, never committed).
+# The lock file IS committed (provider pinning); .terraform/ and state are not.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+
