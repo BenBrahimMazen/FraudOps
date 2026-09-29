@@ -102,7 +102,15 @@ CREATE INDEX IF NOT EXISTS prediction_features_feature_idx
 
 
 def ensure_schema(conn: psycopg.Connection) -> None:
-    """Create/migrate every table (idempotent)."""
+    """Create/migrate every table (idempotent).
+
+    Runs under a short ``lock_timeout``: the DDL needs an exclusive lock on
+    ``predictions``, and a reader with an open transaction would otherwise
+    park every service startup behind it indefinitely. A timeout raises
+    (``psycopg.errors.LockNotAvailable``) and the caller's retry loop tries
+    again on its next poll.
+    """
     with conn.cursor() as cur:
+        cur.execute("SET lock_timeout = '10s'")
         cur.execute(SCHEMA)
     conn.commit()

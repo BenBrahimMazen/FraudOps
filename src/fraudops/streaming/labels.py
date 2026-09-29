@@ -14,6 +14,7 @@ simulated clock.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 import psycopg
@@ -92,8 +93,10 @@ def run_job(dsn: str, poll_seconds: float = 10.0) -> None:
             moved = release_due_labels(conn)
             if moved:
                 print(f"released {moved} labels at clock {sim_clock(conn)}", flush=True)
-        except psycopg.OperationalError as exc:
-            print(f"postgres unavailable, retrying: {exc}", flush=True)
+        except psycopg.Error as exc:
+            # connection loss AND retryable failures (e.g. ensure_schema hitting
+            # the lock timeout while another service reads) — drop and retry
+            print(f"postgres error, retrying: {exc}", flush=True)
             conn = None
         time.sleep(poll_seconds)
 
@@ -102,7 +105,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--database-url",
-        default="postgresql://fraudops:fraudops-local@localhost:5432/fraudops",
+        default=os.environ.get(
+            "DATABASE_URL", "postgresql://fraudops:fraudops-local@localhost:5432/fraudops"
+        ),
     )
     parser.add_argument("--poll-seconds", type=float, default=10.0)
     args = parser.parse_args()

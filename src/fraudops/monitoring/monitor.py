@@ -342,12 +342,19 @@ def run_monitor(
     start_http_server(metrics_port, registry=registry)
 
     holder = ModelHolder(tracking_uri=tracking_uri, model_name=model_name)
-    conn = psycopg.connect(database_dsn)
-    ensure_schema(conn)
+    conn: psycopg.Connection | None = None
 
     reference: Reference | None = None
     while True:
         try:
+            if conn is None or conn.closed:
+                conn = psycopg.connect(database_dsn)
+                ensure_schema(conn)
+            # first pass loads the champion; later passes follow promotions
+            # (a new champion means the reference below is rebuilt too)
+            holder.reload_if_changed()
+            if holder.last_error:
+                logger.warning("champion load failed: %s", holder.last_error)
             loaded = holder.require()
             if reference is None or reference.champion_version != loaded.version:
                 logger.info("building drift reference for champion v%s ...", loaded.version)
@@ -366,6 +373,10 @@ def run_monitor(
             gauges["champion"].set(loaded.version)
 
             window = fetch_window(conn, int(cfg["window_sim_days"]))
+            # close the read transaction NOW: an idle-in-transaction reader
+            # holds an AccessShare lock that blocks every other service's
+            # ensure_schema (AccessExclusive) for as long as we sleep
+            conn.commit()
             if not window or len(window["predictions"]) < cfg["min_window_predictions"]:
                 logger.info(
                     "waiting for predictions (window has %s)", len(window.get("predictions", []))
@@ -408,8 +419,16 @@ def run_monitor(
                 logger.warning("drift alerts: %s | %s", "; ".join(a[2] for a in alerts), status)
             else:
                 logger.info(status)
+        except psycopg.OperationalError as exc:
+            conn = None  # postgres restarted — reconnect next cycle
+            logger.warning("postgres unavailable, retrying: %s", exc)
         except Exception:  # noqa: BLE001 — the monitor keeps running
             logger.exception("monitor cycle failed")
+            if conn is not None and not conn.closed:
+                try:
+                    conn.rollback()  # clear an aborted transaction, if any
+                except psycopg.Error:
+                    conn = None
         time.sleep(cycle_seconds)
 
 
