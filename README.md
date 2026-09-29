@@ -22,8 +22,7 @@ model is deployed.
 | 2 | MLflow/MinIO registry, Airflow, FastAPI serving | done |
 | 3 | Kafka replay, delayed labels, drift monitoring | done |
 | 4 | Closed loop: trigger → retrain → gate → promote/rollback | done |
-| 5 | Experiments, load testing, figures | pending |
-| 5 | Experiments, load testing, figures | pending |
+| 5 | Experiments, load testing, figures | done |
 | 6 | Terraform/LocalStack, CI/CD polish | pending |
 
 Every metric below comes from a real run and can be regenerated with the
@@ -37,7 +36,7 @@ Requirements: Python 3.11, [`uv`](https://docs.astral.sh/uv/), GNU `make`
 ```bash
 uv sync        # or: make install — create the locked virtualenv
 make lint      # ruff check + format check
-make test      # pytest (137 tests: unit, leakage, parity, gate, integration)
+make test      # pytest (140 tests: unit, leakage, parity, gate, integration)
 make data      # validate the two CSVs in data/raw/
 make train     # local run: load -> split -> features -> LightGBM -> threshold -> evaluation -> MLflow
 make up        # core stack: postgres, minio, mlflow, api
@@ -88,7 +87,7 @@ Docker stack, champion v1 — 500 trees, 96 features):
 - 288 predictions persisted to Postgres with model version + latency;
   `/metrics` exposes the same counts
 
-The load-test numbers under concurrent Locust traffic arrive in Phase 5.
+Concurrent Locust traffic on the same stack: see the Phase 5 load test.
 
 ## Orchestration (Phase 2, `make up-full`)
 
@@ -255,6 +254,171 @@ keeps the trigger hot — a schedule would retrain on every wake-up. The monitor
 exposes the trigger state as the `fraudops_drift_trigger` Prometheus gauge for
 an external scheduler; Phase 5 measures detection lag off exactly this signal.
 
+## Experiments and figures (Phase 5, one command: `make report`)
+
+Every figure and table regenerates from the raw data plus the live
+databases — `make report` runs all five report scripts (each also works
+standalone as `uv run python -m fraudops.reports.<name>`), and every
+experiment arm is logged to the MLflow experiment `fraudops_experiments`
+so each number traces to a run. All measurements on this machine: AMD
+Ryzen 5 3500U (4 cores / 8 threads, laptop), 16 GB RAM, Docker Desktop
+VM ≈ 8.8 GB, Windows 10, API container without CPU/memory limits.
+
+### 1. Frozen-model decay — `reports/figures/decay_curve.{csv,png}`
+
+Champion v1 judged only on what it actually served: stored
+scores/decisions joined to the labels released 7 sim days later,
+trailing 7-day windows stepped one day (the monitor's own window shape).
+
+PR-AUC erodes from 0.554 (window ending day 157) to a 0.420 trough
+(day 170), recovering to 0.494 by day 175 — always below the 0.595
+validation reference, i.e. the model arrived already degraded and kept
+sliding. Expected cost per 100k climbs 208k → 283k (peak day 173) →
+233k while the alert rate creeps 26.8% → 33.5%: the model drifts toward
+crying wolf, each false alert still costing 5.0. The ×3 injection
+(day 165) shows up more sharply in cost than PR-AUC — tripling amounts
+triples the price of every miss without moving ranking quality much,
+and 7-day windows straddle the boundary so nothing is a step change.
+
+### 2. Retraining policies — `reports/figures/retrain_comparison.{csv,png}`
+
+Three policies over the labelled replay (sim days 150–175, 76,649
+transactions). Each retrain rebuilds exactly what that moment could know
+(`as_of` label visibility — the same rule the release job enforces) and
+fits through the same `fit_challenger` the live DAG uses; the no-retraining
+arm is the frozen champion's actual served record.
+
+| policy | retrains | total cost 150–175 | active window | cost/100k (active) | PR-AUC (active) |
+|---|---|---|---|---|---|
+| no retraining (v1 as served) | 0 | 174,355 | — | 227,676 (whole period) | 0.494 |
+| scheduled weekly | 1 — at day 171 | 171,340 | 171–175 | 180,905 | 0.538 |
+| drift-triggered (PSI alert) | 1 — at day 169 | 169,412 | 169–175 | 207,855 | 0.519 |
+
+The 7-day label delay dominates the whole comparison: the ×3 shift lands
+at day 165 but its **labels only exist from day 172**, so neither retrain
+could train on the drift itself — both improve through fresher
+natural-drift labels and a re-tuned threshold (0.081 / 0.115 vs v1's
+0.0296, i.e. far fewer false alerts once amounts are tripled). The weekly
+schedule **starves** before it starts: ticks at day 157 (no labels
+visible) and day 164 (the 7 visible days are entirely consumed by
+threshold validation, leaving zero training rows) are skipped exactly as
+a real scheduler would — its first usable tick is day 171, and a 14-day
+cadence never gets a usable window at all inside this horizon.
+
+The triggered arm wins on total cost (169.4k vs 171.3k) because it takes
+over two days earlier and covers the champion's two worst decay days
+(169–170, windows of 271k/280k per 100k) with a fresh model — not
+because it knows more about the drift. The scheduled arm's model is
+actually better per transaction on its own window (180.9k/100k, PR-AUC
+0.538, trained with two more label days), but that is outweighed by
+serving decayed v1 through days 169–170. The active windows differ
+(5 vs 7 days), so the per-100k columns are not head-to-head. The best
+model of all was the live loop's v3 — trained once the drifted labels
+existed (cutoff day 168): 182.9k/100k at PR-AUC 0.556 on the gate
+window, the Phase 4 promotion. Every arm run is logged to MLflow
+(`fraudops_experiments`). Honest caveat: single seed, single replay —
+the 2–3% margins between arms are within plausible seed variance.
+
+### 3. Threshold sensitivity to review cost — `reports/figures/threshold_sensitivity.{csv,png}`
+
+The shipped threshold (review cost 5.0) lands at 0.029609 — exactly the
+baseline's shipped 0.0296, reproduced by the same `optimal_cost_threshold`
+the trainer uses: the figure is the training rule, not a re-derivation.
+
+| review cost | optimal threshold | alert rate | recall | cost /100k |
+|---|---|---|---|---|
+| 1 | 0.0083 | 42.5% | 94.7% | 65,696 |
+| 5 | 0.0296 | 26.7% | 89.2% | 188,073 |
+| 10 | 0.1514 | 10.8% | 74.0% | 253,740 |
+| 25 | 0.4708 | 4.0% | 59.6% | 314,625 |
+
+The operating point is extremely sensitive to the review cost — a 25×
+change moves the threshold 56× and halves recall. Missed fraud stays the
+dominant cost share everywhere (37–85%), so even at review cost 25 the
+optimum is not "alert on nothing". The realistic-operational-loads
+observation from Phase 1 stands: at review cost 5 (average fraud ≈ 149)
+the optimum tolerates a 27% alert rate; teams with human review
+capacity would sit nearer the cost-10 row.
+
+### 4. Detection lag by injected shift — `reports/figures/detection_lag.{csv,png}`
+
+Six scenarios replayed **offline through the exact monitor semantics**
+(v1's reference, top-20 features, PSI warn 0.1 / alert 0.2, trailing
+7-day windows), each with only its own injection applied:
+
+| scenario | warning lag | alert lag | max PSI |
+|---|---|---|---|
+| amount ×1.5 | 3 d | 4 d | 0.54 |
+| amount ×2 | 3 d | 4 d | 0.66 |
+| amount ×3 (the live one) | 2 d | 2 d | 1.60 |
+| amount ×5 | 1 d | 2 d | 2.82 |
+| nullify C13 | 6 d | 6 d | 0.31 |
+| nullify P_emaildomain | masked | masked | 25.76 |
+
+Bigger shifts are caught faster (×5 warns within a day; ×1.5 takes
+three), and subtle corruption (a counting feature nulled) takes ~6 days
+— PSI needs the window to fill with shifted data before the histogram
+moves. The ×3 offline row (2-day alert) is a lower bound on the live
+measurement (warning day 167, alert day 169): offline windows are
+complete simulated days, while the live monitor evaluates partial
+windows as the replay clock moves. `nullify P_emaildomain` is
+**masked**: that channel was already in natural-drift alert before the
+injection (first warning day 157 < 165), so this shift's own lag is not
+measurable — a real caveat of fixed-reference drift monitoring, shown
+rather than hidden. Score PSI never crossed 0.1 in any scenario (max
+0.054 at ×5), consistent with Phase 3: feature drift ≠ score drift.
+
+### 5. Load test — Locust on `POST /score`
+
+Saturation profile (no think time), full stack running (12 containers
+incl. monitor and Airflow), API in Docker without CPU/memory limits,
+**single Uvicorn worker**, Locust on the host. Hardware: AMD Ryzen 5
+3500U (4C/8T laptop), 16 GB RAM, Docker Desktop VM ≈ 8.8 GB, Windows 10.
+Headline run: `make loadtest USERS=50 RUN_TIME=2m`; the 1/10/25-user
+points come from the same file with `-u` overridden.
+
+| concurrent users | requests | throughput | p50 | p95 | p99 | failures |
+|---|---|---|---|---|---|---|
+| 1 | 675 | 15.0 /s | 60 ms | **90 ms** | 140 ms | 0 |
+| 10 | 882 | 14.8 /s | 650 ms | 960 ms | 1.0 s | 0 |
+| 25 | 776 | 13.2 /s | 1.8 s | 2.7 s | 3.0 s | 0 |
+| 50 | 1,362 | 11.5 /s | 3.7 s | 5.9 s | 13.0 s | 0 |
+
+Reading it honestly: the **p95 < 100 ms target is met for a single
+concurrent request** (90 ms p95, 60 ms p50 — matching the Phase 2
+steady-state numbers), and the service never errors under saturation —
+but it saturates at **~13–15 requests/s** regardless of offered
+concurrency, with latency growing linearly in the queue (Little's law
+holds at every level: users ≈ rps × latency). The cause is structural:
+one Uvicorn worker, and a `/score` path dominated by GIL-bound Python
+(Pydantic validation, DataFrame build, pandas feature transform) around
+a native TreeSHAP call that releases the GIL for only part of the work —
+so the process serialises at roughly one request per single-request
+latency. Four cores cannot help one Python process. What would move it:
+multiple Uvicorn workers (one model copy each — a memory cost on this
+stack), moving the hot path off pandas, or leaning on `/score/batch`
+(~4 ms/row amortised). Documented as the deployment's real capacity
+envelope: correct and predictable, but single-process.
+
+### 6. SHAP summary and reason codes — `reports/figures/shap_summary.png`, `reason_codes.md`
+
+Champion v3 explained on a 5,000-transaction labelled sample (sim days
+168–175, seed 42). Three example `/score` outputs, top-3 features by
+|contribution| exactly as the API computes them:
+
+| case | score | decision | top reasons (log-odds) |
+|---|---|---|---|
+| highest score | 0.999 | alert (actual fraud) | `C1`=5.0 +2.06, `C14`=0 +1.51, `C13`=0 +1.24 |
+| borderline | 0.084 | approve (actual legit) | `card1`=11298 +1.21, `C5`=1 −0.69, `log_TransactionAmt` +0.64 |
+| lowest score | 0.000 | approve (actual legit) | `DeviceInfo` −2.14, `card1` −1.60, `card3` −1.35 |
+
+The beeswarm shows anonymised counters (`C1`, `C13`, `C14`, `C5`) and
+`card1`/`card3` doing most of the work, with amount contributing
+positively. Reason codes are technical, not analyst narratives — an
+honest consequence of the anonymised schema (see Limitations), and the
+borderline case shows why: `card1` pushing +1.2 toward fraud with no
+business gloss a reviewer could act on.
+
 ## Phase 1 results — baseline (one command: `make train`)
 
 Chronological split in simulated days (0–119 / 120–149 / 150–182): train
@@ -320,9 +484,11 @@ evaluation.
 - **Feature set is deliberately small**: no anonymised V-columns and no
   competition-style group-key aggregation features; leaderboard-grade PR-AUC
   is explicitly not the goal of this project.
-- **Latency numbers are single-user** so far: the p50/p95 above are
-  steady-state sequential calls inside Docker on one laptop; concurrent
-  Locust numbers (Phase 5) are not yet measured.
+- **Serving is single-process**: one Uvicorn worker meets the p95 < 100 ms
+  target per request at low concurrency but saturates at ~13–15 req/s
+  under load (GIL-bound scoring path; measured envelope in Phase 5).
+  Multiple workers or a non-pandas hot path would raise the ceiling at
+  the cost of one model copy per process.
 - **Airflow runs as a single container** (`standalone`, LocalExecutor) — a
   local-scale deployment, not a production Airflow topology; the fraudops
   package is installed under Airflow's constraint set, so its pandas/fastapi
