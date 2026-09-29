@@ -27,6 +27,7 @@ import numpy as np
 import pandas as pd
 import psycopg
 import yaml
+from psycopg.types.json import Json
 from sklearn.metrics import average_precision_score
 
 from fraudops.data.clock import sim_day
@@ -119,8 +120,16 @@ def build_reference(
     )
 
 
-def fetch_window(conn, window_sim_days: int) -> dict:
-    """Predictions, stored features and released labels of the last window."""
+def fetch_window(conn, window_sim_days: int, label_delay_days: int = 7) -> dict:
+    """Predictions, stored features and released labels of the last window.
+
+    The labelled-performance lookback reaches ``window + label_delay`` days
+    back: a prediction becomes labelable exactly ``label_delay`` days after it
+    was scored, so with a 7-day window and a 7-day delay the trailing window
+    alone is NEVER fully labelled (its earliest row is the only one whose
+    label exists) — performance monitoring silently got an empty set until
+    this lookback accounted for the delay.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -157,7 +166,10 @@ def fetch_window(conn, window_sim_days: int) -> dict:
             WHERE p.sim_ts IS NOT NULL AND p.sim_ts >= %s
               AND l.available_at_dt <= %s
             """,
-            (window_start, max_dt),
+            # the most recent predictions whose labels can exist: the window,
+            # shifted back by the label delay (the available_at filter below
+            # still decides which are actually released)
+            (max_dt - (window_sim_days + label_delay_days) * 86_400, max_dt),
         )
         labelled = cur.fetchall()
     return {
@@ -268,6 +280,16 @@ def persist_results(
                 None,
                 None,
                 "ok",
+                # values live in details: the retrain DAG re-derives the trigger
+                # from these persisted rows when it wakes up (psycopg needs an
+                # explicit Json adapter for the JSONB column)
+                Json(
+                    {
+                        "pr_auc": perf.pr_auc,
+                        "cost_per_100k": perf.cost_per_100k,
+                        "n_labelled": perf.n_labelled,
+                    }
+                ),
             )
         )
     with conn.cursor() as cur:
@@ -372,7 +394,11 @@ def run_monitor(
                 )
             gauges["champion"].set(loaded.version)
 
-            window = fetch_window(conn, int(cfg["window_sim_days"]))
+            window = fetch_window(
+                conn,
+                int(cfg["window_sim_days"]),
+                label_delay_days=int(cfg.get("label_delay_days", 7)),
+            )
             # close the read transaction NOW: an idle-in-transaction reader
             # holds an AccessShare lock that blocks every other service's
             # ensure_schema (AccessExclusive) for as long as we sleep
