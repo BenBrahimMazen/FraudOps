@@ -43,3 +43,6 @@ tmp_*
 Thumbs.db
 .idea/
 .vscode/
+
+# generated reports (evidently HTML, figures)
+reports/

@@ -20,7 +20,7 @@ model is deployed.
 | 0 | Scaffolding, tooling, CI | done |
 | 1 | Data, chronological split, LightGBM baseline, cost threshold | done |
 | 2 | MLflow/MinIO registry, Airflow, FastAPI serving | done |
-| 3 | Kafka replay, delayed labels, drift monitoring | pending |
+| 3 | Kafka replay, delayed labels, drift monitoring | done |
 | 4 | Closed loop: trigger → retrain → gate → promote/rollback | pending |
 | 5 | Experiments, load testing, figures | pending |
 | 6 | Terraform/LocalStack, CI/CD polish | pending |
@@ -109,6 +109,73 @@ The Airflow image installs the package under Airflow's constraint set
 (pandas 2.1.4 there vs 3.0.6 in the lock file); a container-side smoke
 script (`scripts/smoke_airflow_env.py`) exercises both feature-pipeline
 branches plus a LightGBM fit on that stack before DAG runs are trusted.
+
+## Streaming, delayed labels and drift monitoring (Phase 3)
+
+`make up-full` starts Kafka (KRaft, single node) plus the scorer consumer,
+the label-release job, the drift monitor, Prometheus and Grafana. Then
+`make drift-amount FACTOR=3 FROM_DAY=165` arms a synthetic shift and
+`make replay DAY_SECONDS=8` replays the stream split through it:
+
+- **Replay** (`make replay DAY_SECONDS=8`, 2026-09-28): 94,636 events
+  (sim days 150–182) published in TransactionDT order at **328.6 events/s**.
+- **Scoring**: the consumer scores every event with the champion through the
+  same library the API uses (no serving-only code path) — **94,636 of 94,636
+  predictions stored**, 94,636 distinct transaction ids, 1,892,720 feature
+  rows (exactly the top-20 features per prediction), 28,508 alerts (30.1%) at
+  the cost-optimal threshold 0.0296.
+- **Delayed labels**: labels never travel on the topic. The producer stages
+  them in `labels_pending`; the release job moves them to `labels` once the
+  simulated clock passes `TransactionDT + 7 days`. Final state:
+  76,759 released + 17,877 pending = 94,636 exactly.
+- **Drift monitoring**: 87 cycles (15 s apart), PSI + KS on the top-20 gain
+  features plus score PSI, trailing 7-sim-day window, every result in
+  `monitoring_results` and Prometheus/Grafana (`fraudops_drift_psi` gauges).
+
+**Injected shift, detected as designed.** With amounts ×3 from sim day 165:
+
+| sim day | `log_TransactionAmt` PSI | level |
+|---|---|---|
+| 150–166 | 0.004 – 0.081 | ok |
+| 167 | 0.188 | **warning** — 2 sim days after injection |
+| 169 | 0.460 | **alert** — 4 sim days after |
+| 170 → 182 | 0.93 → 1.61 | sustained alert |
+
+**Score drift never fired**: score PSI stayed ≤ 0.039 the whole replay
+(warning level is 0.1). The champion's probability distribution was stable
+under both the ×3 amount shift and heavy natural feature drift — feature
+drift ≠ score drift. The retrain trigger fires on feature PSI; Phase 4 gates
+what actually happens next.
+
+**Natural drift was alerting from day 150**: `id_31`/`id_30`/`id_33`
+(browser/OS metadata, PSI up to 7.4), `DeviceInfo` (2.6), `R_emaildomain`
+(2.3). The train window (days 0–119) and the stream differ enough in device
+mix to trigger continuously against a fixed training reference — honest
+behaviour, not a bug: population change is exactly what a fixed-reference PSI
+is meant to flag.
+
+Two data-loss bugs were found and fixed during live verification (the kind
+of thing only a real end-to-end run surfaces):
+
+1. **Kafka message timestamps** — the producer stamped messages with
+   dataset-epoch *seconds* where Kafka expects epoch *milliseconds*: every
+   message dated 1970-01-01, so segment roll timers and the 7-day retention
+   both saw "56-year-old" data and the broker's 5-minute sweep deleted
+   segments under the lagging scorer, twice (31,936 then 38,440 predictions
+   silently skipped — offsets committed, lag 0, no errors anywhere). Fix: no
+   message timestamps; simulated time travels in the payload, which the
+   consumer, label release and monitor already read. Side effect: producer
+   throughput went 188.7 → 328.6 events/s (no more micro-segment churn).
+2. **Consumer tail freeze** — `consumer.poll(0.2)` once blocked 8+ minutes on
+   a librdkafka-internal futex (SIGINT traceback pinned it), and the idle
+   branch never flushed the write buffer, so the last 136 predictions reached
+   Postgres only via the shutdown flush. Fix: idle-branch flush + a 5 s
+   watchdog flusher thread; the scorer now restarts unless-stopped. A hung
+   `poll()` still stalls consumption until restart — documented limitation.
+
+`make report-evidently` writes an HTML drift report for the last window
+(`reports/evidently/`), built against the same champion training reference
+the live monitor uses.
 
 ## Phase 1 results — baseline (one command: `make train`)
 
