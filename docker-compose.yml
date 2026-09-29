@@ -143,6 +143,7 @@ services:
         condition: service_healthy
     environment:
       <<: *app-env
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/${POSTGRES_DB:-fraudops}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-fraudops}:${POSTGRES_PASSWORD:-fraudops-local}@postgres:5432/airflow
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"

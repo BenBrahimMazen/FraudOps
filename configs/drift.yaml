@@ -18,3 +18,12 @@ trigger:
   score_psi_alert: 0.2
   feature_psi_alert: 0.2
   min_features_in_alert: 3
+
+# closed loop (Phase 4)
+retrain:
+  window_sim_days: 7         # gate evaluation window (fully-labelled)
+  val_days: 7                # threshold slice just before the gate window
+
+gate:
+  min_cost_advantage: 0.01   # challenger must beat champion cost by >= this margin
+  allow_pr_auc_drop: 0.0     # no PR-AUC regression tolerated at promotion time
