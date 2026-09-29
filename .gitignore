@@ -44,5 +44,6 @@ Thumbs.db
 .idea/
 .vscode/
 
-# generated reports (evidently HTML, figures)
-reports/
+# generated reports (evidently HTML, figures) — anchored: must not match
+# src/fraudops/reports/ (the code that generates them)
+/reports/

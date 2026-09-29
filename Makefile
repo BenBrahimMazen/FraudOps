@@ -2,6 +2,8 @@
 # Targets marked [Phase N] are placeholders until that phase lands.
 
 PY := uv run
+USERS ?= 50
+RUN_TIME ?= 2m
 COMPOSE := docker compose
 CORE := --profile core
 FULL := --profile full
@@ -112,8 +114,13 @@ report-evidently: ## HTML drift report for the last window
 	$(COMPOSE) $(FULL) $(TOOLS) run --rm --entrypoint python replay \
 	    -m fraudops.monitoring.evidently_report --data-dir /data/raw
 
-loadtest: ## Locust load test of the scoring API [Phase 5]
-	@echo "loadtest: not yet implemented (arrives in Phase 5)"
-
 report: ## Regenerate every figure and table from raw data [Phase 5]
-	@echo "report: not yet implemented (arrives in Phase 5)"
+	$(PY) python -m fraudops.reports.decay
+	$(PY) python -m fraudops.reports.threshold_sensitivity
+	$(PY) python -m fraudops.reports.detection_lag
+	$(PY) python -m fraudops.reports.shap_report
+	$(PY) python -m fraudops.reports.retrain_compare
+
+loadtest: ## Locust load test of /score (USERS=50 RUN_TIME=2m) [Phase 5]
+	$(PY) locust -f loadtest/locustfile.py --headless -u $(USERS) -r 5 -t $(RUN_TIME) \
+	    --host http://localhost:8000 --csv reports/figures/locust --only-summary 2>&1 | tail -12
