@@ -1,9 +1,14 @@
 """Evidently HTML reports for the replayed window (on demand).
 
 Human-readable snapshots complementing the always-on PSI/KS metrics:
-``make report-evidently`` writes ``reports/evidently/<sim_day>.html``. Kept
-out of the hot monitoring loop — Evidently's value here is the report, not
+``make report-evidently`` writes ``reports/evidently/evidently_day<simday>.html``.
+Kept out of the hot monitoring loop — Evidently's value here is the report, not
 the arithmetic (our own tested PSI module feeds Prometheus and the trigger).
+
+The reference comes from ``monitor.build_reference`` — the same code path the
+live monitor uses — so the report compares the window against the champion's
+training reference through the real feature pipeline, engineered features
+included. Written against evidently 0.7 (``evidently.presets``).
 """
 
 from __future__ import annotations
@@ -12,78 +17,75 @@ import argparse
 import os
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import psycopg
-import yaml
 
-from fraudops.data.clock import sim_day
-from fraudops.data.loader import load_joined
-from fraudops.storage import ensure_schema
+from fraudops.monitoring.monitor import build_reference, fetch_window
+from fraudops.serving.model_loader import ModelHolder
 
 
 def build_report(
     database_dsn: str,
+    tracking_uri: str,
+    model_name: str,
     data_dir: Path,
     configs_dir: Path,
     output_dir: Path,
     window_sim_days: int = 7,
     features: int = 10,
 ) -> Path:
-    from evidently.metric_preset import DataDriftPreset
-    from evidently.report import Report
+    from evidently.future.report import Report
+    from evidently.presets.drift import DataDriftPreset
 
-    with (configs_dir / "splits.yaml").open(encoding="utf-8") as fh:
-        splits_cfg = yaml.safe_load(fh)
+    holder = ModelHolder(tracking_uri=tracking_uri, model_name=model_name)
+    loaded = holder.load()
 
     conn = psycopg.connect(database_dsn)
-    ensure_schema(conn)
-    with conn.cursor() as cur:
-        cur.execute("SELECT COALESCE(MAX(sim_ts), 0) FROM predictions")
-        max_dt = cur.fetchone()[0]
-        if not max_dt:
-            raise SystemExit("no predictions yet — replay something first")
-        cur.execute(
-            """
-            SELECT pf.feature, pf.value_num, pf.value_text
-            FROM prediction_features pf
-            WHERE pf.sim_ts >= %s
-            """,
-            (max_dt - window_sim_days * 86_400,),
-        )
-        rows = cur.fetchall()
-        cur.execute(
-            "SELECT fraud_probability FROM predictions WHERE sim_ts >= %s",
-            (max_dt - window_sim_days * 86_400,),
-        )
-        window_scores = [r[0] for r in cur.fetchall()]
+    window = fetch_window(conn, window_sim_days)
+    if not window:
+        raise SystemExit("no predictions yet — replay something first")
 
-    by_feature: dict[str, list] = {}
-    for feature, value_num, value_text in rows:
-        by_feature.setdefault(feature, []).append(value_text if value_num is None else value_num)
-    window_df = pd.DataFrame({name: values for name, values in list(by_feature.items())[:features]})
-    window_df["score"] = window_scores
+    reference = build_reference(
+        loaded.bundle, data_dir, configs_dir, top_k=features, version=loaded.version
+    )
 
-    # reference: the training split through the same feature columns
-    df = load_joined(data_dir / "train_transaction.csv", data_dir / "train_identity.csv")
-    train = df[sim_day(df["TransactionDT"]) < int(splits_cfg["train_days"])]
-    train = train.sample(n=min(len(window_df) * 4, len(train)), random_state=42)
-    reference_df = window_df.iloc[0:0].copy()
-    for col in window_df.columns:
-        if col == "score":
-            continue
-        if col.startswith(("log_", "sim_")):
-            continue
-        raw = train.get(col)
-        reference_df[col] = raw.astype(object).where(raw.notna()) if raw is not None else np.nan
+    # current window: one value per (transaction, top-K feature); every scored
+    # transaction stores all K features, so all lists share one length
+    by_feature: dict[str, list] = {name: [] for name in reference.feature_names}
+    for feature, value_num, value_text, _sim_ts in window["features"]:
+        col = by_feature.get(feature)
+        if col is not None:
+            col.append(value_text if value_num is None else value_num)
+    n_rows = min(len(v) for v in by_feature.values())
+    current_df = pd.DataFrame({name: values[:n_rows] for name, values in by_feature.items()})
+    current_df["score"] = [p[1] for p in window["predictions"]][:n_rows]
 
-    report = Report(metrics=[DataDriftPreset()])
-    report.run(reference_data=reference_df, current_data=window_df)
-    day = int(max_dt // 86_400)
+    reference_df = pd.DataFrame(
+        {name: list(values) for name, values in reference.feature_reference.items()}
+    )
+    reference_df["score"] = reference.score_reference
+
+    # The monitor's reference stores categorical dtype as strings while the
+    # consumer persists numeric categories as value_num floats — coerce each
+    # column to one type across both frames or evidently 0.7 rejects the pair
+    for col in current_df.columns:
+        if pd.api.types.is_numeric_dtype(current_df[col]):
+            reference_df[col] = pd.to_numeric(reference_df[col], errors="coerce")
+        else:
+            reference_df[col] = reference_df[col].astype("string")
+            current_df[col] = current_df[col].astype("string")
+
+    # evidently 0.7: run() returns a Snapshot which owns the HTML export
+    snapshot = Report([DataDriftPreset()]).run(reference_data=reference_df, current_data=current_df)
+    day = int(window["max_dt"] // 86_400)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"evidently_day{day}.html"
-    report.save_html(str(path))
-    print(f"evidently report written: {path}")
+    snapshot.save_html(str(path))
+    print(
+        f"evidently report written: {path} "
+        f"(reference champion v{loaded.version}, {len(reference_df):,} train rows vs "
+        f"{n_rows:,} window rows, {len(current_df.columns)} columns)"
+    )
     return path
 
 
@@ -97,6 +99,12 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--tracking-uri", default=os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000")
+    )
+    parser.add_argument(
+        "--model-name", default=os.environ.get("FRAUDOPS_MODEL_NAME", "fraudops-lightgbm")
+    )
+    parser.add_argument(
         "--data-dir", type=Path, default=Path(os.environ.get("FRAUDOPS_DATA_DIR", "data/raw"))
     )
     parser.add_argument("--configs-dir", type=Path, default=Path("configs"))
@@ -106,6 +114,8 @@ def main() -> None:
     args = parser.parse_args()
     build_report(
         database_dsn=args.database_url,
+        tracking_uri=args.tracking_uri,
+        model_name=args.model_name,
         data_dir=args.data_dir,
         configs_dir=args.configs_dir,
         output_dir=args.output_dir,

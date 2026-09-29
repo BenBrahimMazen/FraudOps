@@ -263,6 +263,7 @@ services:
     volumes:
       - ./data:/data:ro
       - ./configs:/app/configs:ro
+      - ./reports:/app/reports
     entrypoint: ["python", "-m", "fraudops.streaming.replay"]
 
   prometheus:
