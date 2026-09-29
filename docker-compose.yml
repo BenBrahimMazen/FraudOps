@@ -129,6 +129,7 @@ services:
       - ./data:/data:ro
       - ./configs:/app/configs:ro
       - ./reports:/app/reports
+      - ./demo:/app/demo
     entrypoint: ["python", "-m", "fraudops.registry.bootstrap"]
 
   airflow:

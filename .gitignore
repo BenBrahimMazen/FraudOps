@@ -55,3 +55,8 @@ Thumbs.db
 *.tfstate.*
 crash.log
 
+# --- Demo export (derived from competition data; never committed) ---
+/demo/model/
+/demo/meta.json
+/demo/staging/
+

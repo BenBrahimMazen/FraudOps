@@ -12,7 +12,8 @@ TOOLS := --profile tools
 .DEFAULT_GOAL := help
 .PHONY: help install lint typecheck format test precommit up down up-full bootstrap status \
         promote rollback logs data train replay drift loadtest report \
-        tf-init tf-validate tf-plan tf-plan-compute tf-apply tf-destroy
+        tf-init tf-validate tf-plan tf-plan-compute tf-apply tf-destroy \
+        demo-export demo-build demo-run demo-deploy
 
 help: ## List available targets
 	@echo "FraudOps Makefile targets:"
@@ -41,6 +42,8 @@ help: ## List available targets
 	@echo "  tf-*       - terraform (containerized): init/validate/plan/apply"
 	@echo "               against LocalStack ONLY - never real AWS"
 	@echo "  tf-plan-compute - plan the ECR/ECS/ALB layer (Pro-gated in LocalStack, plan-only)"
+	@echo "  demo-*     - standalone serving demo: export champion, build image, run on :7860,"
+	@echo "               deploy to a Hugging Face Space (HF_TOKEN + SPACE_ID in .env)"
 
 install: ## Create/refresh the locked virtualenv
 	uv sync
@@ -153,3 +156,16 @@ tf-apply: ## apply against LocalStack ONLY - never real AWS
 
 tf-destroy: ## tear the LocalStack resources back down
 	$(COMPOSE) $(FULL) $(TOOLS) run --rm terraform destroy -auto-approve
+
+demo-export: ## Export the live champion into demo/model (stack must be up)
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm --entrypoint python bootstrap \
+	    -m fraudops.registry.export --out /app/demo
+
+demo-build: ## Build the self-contained demo image (needs demo-export)
+	docker build -f demo/Dockerfile -t fraudops-demo .
+
+demo-run: ## Run the demo image on http://localhost:7860 (docs at /docs)
+	docker run --rm -p 7860:7860 --name fraudops-demo fraudops-demo
+
+demo-deploy: ## Upload the demo to a HF Space (HF_TOKEN + SPACE_ID in .env)
+	$(PY) python demo/deploy.py
