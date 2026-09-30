@@ -118,6 +118,21 @@ make replay DAY_SECONDS=8                 # ~5 min, 94,636 events
   champion **16 s** after the gate decision, no restarts.
 - `make rollback` undoes it. `make report` regenerates every figure.
 
+## Demo: standalone scoring API
+
+The serving layer also runs as a single container with the champion baked
+in — no Postgres, MinIO or Kafka, just scoring with SHAP reasons:
+
+```bash
+make demo-export   # download the live @champion into demo/model
+make demo-build    # build the self-contained image
+make demo-run      # http://localhost:7860/docs
+```
+
+`POST /score` needs only `TransactionID`, `TransactionDT`, `TransactionAmt`
+(everything else is treated as missing); `GET /model` shows the champion's
+threshold and gate metrics.
+
 ## Results
 
 ### Baseline: optimise for money, not F1
