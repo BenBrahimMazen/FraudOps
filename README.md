@@ -130,6 +130,12 @@ make replay DAY_SECONDS=8                 # ~5 min, 94,636 events
   champion **16 s** after the gate decision, no restarts.
 - `make rollback` undoes it. `make report` regenerates every figure.
 
+Both shots from the 2026-10-01 re-run:
+
+![Grafana drift dashboard: log_TransactionAmt PSI crossing warning then alert while other features stay flat](assets/grafana-drift.png)
+
+![Airflow after the demo: fraudops_retrain triggered, run succeeded](assets/airflow-dags.png)
+
 ## Demo: standalone scoring API
 
 The serving layer also runs as a single container with the champion baked
@@ -180,6 +186,12 @@ The whole loop was re-run from a wiped stack (2026-10-01): identical
 champion metrics (232,603 / 0.494 — it judges the same stored predictions),
 challenger promoted at 179,641 (+22.8%) — the margin is single-seed
 variance, the decision is the same.
+
+After that promotion (registry and serving, as captured live):
+
+![MLflow registry after the gate decision: champion alias on the promoted version](assets/mlflow-model.png)
+
+![GET /model right after promotion: serving reports the new champion, its threshold and gate metrics](assets/api-model.png)
 
 ### Retraining policies (label delay is the real constraint)
 
