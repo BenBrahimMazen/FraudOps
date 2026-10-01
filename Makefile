@@ -71,7 +71,7 @@ up: ## Start the core stack (postgres, minio, mlflow, api)
 
 up-full: ## Start the full stack (adds airflow on :8080)
 	$(COMPOSE) $(FULL) up -d --build
-	@echo "airflow: http://localhost:8080 (admin password: docker compose exec airflow cat ~/standalone_admin_password.txt)"
+	@echo "airflow: http://localhost:8080 (admin password: docker compose logs airflow 2>&1 | grep -i password)"
 
 down: ## Stop the whole stack
 	$(COMPOSE) $(CORE) $(FULL) $(TOOLS) down

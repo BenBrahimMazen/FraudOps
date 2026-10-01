@@ -123,6 +123,8 @@ make replay DAY_SECONDS=8                 # ~5 min, 94,636 events
 
 - Grafana (`localhost:3000`): `log_TransactionAmt` PSI 0.08 → 0.19
   (**warning**, day 167) → 0.46 (**alert**, day 169), sustained ≥ 0.93.
+  (Re-run end-to-end from a wiped stack on 2026-10-01: warning day 167 at
+  0.19, alert from day 168, peaking 0.96 — same detection profile.)
 - Trigger `fraudops_retrain` in the Airflow UI (`localhost:8080`): it
   retrains, evaluates the gate, promotes — `GET /model` flips to the new
   champion **16 s** after the gate decision, no restarts.
@@ -174,6 +176,10 @@ n = 19,943):
 **Promoted** (−21.4% cost, PR-AUC up), logged to MLflow + `promotion_log`;
 API hot-reloaded 16 s later. Rejection, tie-within-margin and
 PR-AUC-loss-blocks paths are unit-tested on the pure gate function.
+The whole loop was re-run from a wiped stack (2026-10-01): identical
+champion metrics (232,603 / 0.494 — it judges the same stored predictions),
+challenger promoted at 179,641 (+22.8%) — the margin is single-seed
+variance, the decision is the same.
 
 ### Retraining policies (label delay is the real constraint)
 
