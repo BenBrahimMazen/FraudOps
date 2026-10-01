@@ -80,16 +80,16 @@ logs: ## Tail stack logs
 	$(COMPOSE) $(CORE) $(FULL) logs -f --tail 100
 
 bootstrap: ## Train the first model and set it as champion
-	$(COMPOSE) $(CORE) $(TOOLS) run --rm bootstrap train-champion --data-dir /data/raw
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm bootstrap train-champion --data-dir /data/raw
 
 status: ## Registry aliases + versions
-	$(COMPOSE) $(CORE) $(TOOLS) run --rm bootstrap status
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm bootstrap status
 
 promote: ## Move champion alias to the challenger
-	$(COMPOSE) $(CORE) $(TOOLS) run --rm bootstrap promote
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm bootstrap promote
 
 rollback: ## Restore the previous champion (TO=1 for an explicit version)
-	$(COMPOSE) $(CORE) $(TOOLS) run --rm bootstrap rollback $(if $(TO),$(TO),)
+	$(COMPOSE) $(FULL) $(TOOLS) run --rm bootstrap rollback $(if $(TO),$(TO),)
 
 data: ## Validate dataset presence and shape
 	$(PY) python -m fraudops.data.check
