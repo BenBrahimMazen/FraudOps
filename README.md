@@ -2,6 +2,16 @@
 
 [![CI](https://github.com/BenBrahimMazen/FraudOps/actions/workflows/ci.yml/badge.svg)](https://github.com/BenBrahimMazen/FraudOps/actions/workflows/ci.yml)
 
+![Python 3.11](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![LightGBM 4.7](https://img.shields.io/badge/LightGBM-4.7-30B7AA)
+![Kafka 3.9](https://img.shields.io/badge/Kafka-3.9-231F20?logo=apachekafka&logoColor=white)
+![Airflow](https://img.shields.io/badge/Airflow-017CEE?logo=apacheairflow&logoColor=white)
+![MLflow 3.16](https://img.shields.io/badge/MLflow-3.16-111111)
+![PostgreSQL 16](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)
+![Terraform](https://img.shields.io/badge/Terraform-7B42BC?logo=terraform&logoColor=white)
+
 Real-time fraud detection with a **self-healing MLOps loop**: a Kafka
 replay of the IEEE-CIS card-transaction dataset is scored live by FastAPI
 (LightGBM + SHAP reason codes), monitored for feature/score/performance
